@@ -2,9 +2,8 @@ import asyncio
 import hashlib
 import logging
 import random
-import aiohttp
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -25,9 +24,6 @@ REFERRAL_BONUS_PERCENT = 10
 REFERRAL_SIGNUP_BONUS = 5
 REFERRAL_INVITE_BONUS = 10
 
-BOTOHUB_TOKEN = "2c69045b-0cf6-49dc-a9a2-2bb0d563ad20"
-BOTOHUB_API_URL = "https://botohub.me/get-tasks"
-
 # Хранилища данных
 users_balance: Dict[int, int] = {}
 users_referrer: Dict[int, int] = {}
@@ -47,6 +43,7 @@ dp = Dispatcher(storage=storage)
 
 # ===================== FSM =====================
 class GameStates(StatesGroup):
+    custom_deposit = State()
     roulette_bet = State()
     darts_bet = State()
     football_bet = State()
@@ -55,7 +52,6 @@ class GameStates(StatesGroup):
     mines_game = State()
     pyramid_game = State()
     slots_game = State()
-    custom_deposit = State()
 
 
 # ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
@@ -178,6 +174,22 @@ def get_slots_keyboard() -> InlineKeyboardMarkup:
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     user_id = message.from_user.id
+    # Реферальная логика (если есть параметр start=ref_...)
+    if " " in message.text:
+        param = message.text.split()[1]
+        if param.startswith("ref_"):
+            try:
+                referrer_id = int(param[4:])  # упрощённо; в реальности нужно декодировать
+                if referrer_id != user_id and user_id not in users_referrer:
+                    users_referrer[user_id] = referrer_id
+                    users_referrals.setdefault(referrer_id, []).append(user_id)
+                    update_balance(user_id, REFERRAL_SIGNUP_BONUS)
+                    update_balance(referrer_id, REFERRAL_INVITE_BONUS)
+                    save_transaction(user_id, REFERRAL_SIGNUP_BONUS, "referral_bonus", f"от {referrer_id}")
+                    save_transaction(referrer_id, REFERRAL_INVITE_BONUS, "referral_reward", f"пригласил {user_id}")
+                    await message.answer(f"✅ Вы получили {format_stars(REFERRAL_SIGNUP_BONUS)} за регистрацию по ссылке!")
+            except:
+                pass
     await message.answer(
         f"🌟 <b>Добро пожаловать в StarPlay!</b> 🌟\n\n"
         f"{get_random_emoji()} Играй на Telegram Stars и выигрывай!\n\n"
@@ -526,7 +538,7 @@ async def basketball_play(callback: CallbackQuery):
     )
     await callback.answer()
 
-# ---------- МИНЫ (живая игра) ----------
+# ---------- МИНЫ ----------
 active_mines_games: Dict[int, dict] = {}
 
 @dp.callback_query(F.data == "game_mines")
@@ -798,7 +810,7 @@ async def slots_spin(callback: CallbackQuery):
     await callback.answer()
 
 
-# ===================== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ =====================
+# ===================== ПРОЧИЕ ОБРАБОТЧИКИ =====================
 @dp.callback_query(F.data == "referrals")
 async def show_referrals(callback: CallbackQuery):
     user_id = callback.from_user.id
