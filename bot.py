@@ -34,7 +34,7 @@ BOTOHUB_TOKEN = "2c69045b-0cf6-49dc-a9a2-2bb0d563ad20"  # Токен после 
 BOTOHUB_API_URL = "https://botohub.me/get-tasks"
 
 # Обязательная подписка на ваш канал
-REQUIRED_CHANNELS = ["@ваш_канал"]  # Список каналов для обязательной подписки
+REQUIRED_CHANNELS = ["@givegmp"]  # Список каналов для обязательной подписки
 
 # Хранилища данных
 users_balance: Dict[int, int] = {}
