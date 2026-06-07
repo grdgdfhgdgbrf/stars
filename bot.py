@@ -21,7 +21,7 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 # ===================== КОНФИГУРАЦИЯ =====================
 BOT_TOKEN = "8251949164:AAE1fYvR_cMK7PnykcqpCxaXS9vIWxo1VjQ"
-ADMIN_USERNAMES = ["tim2011", "admin"]
+ADMIN_USERNAMES = ["hjklgf1"]
 
 REFERRAL_BONUS_PERCENT = 10
 REFERRAL_SIGNUP_BONUS = 5
