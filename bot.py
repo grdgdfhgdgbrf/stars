@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import logging
 import random
+import os
 from datetime import datetime
 from typing import Dict, List
 
@@ -15,6 +16,7 @@ from aiogram.types import (
     InlineKeyboardButton, PreCheckoutQuery, SuccessfulPayment
 )
 from aiogram.enums import ParseMode
+from aiohttp import web
 
 # ===================== КОНФИГУРАЦИЯ =====================
 BOT_TOKEN = "8251949164:AAE1fYvR_cMK7PnykcqpCxaXS9vIWxo1VjQ"
@@ -174,12 +176,12 @@ def get_slots_keyboard() -> InlineKeyboardMarkup:
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     user_id = message.from_user.id
-    # Реферальная логика (если есть параметр start=ref_...)
+    # Реферальная логика
     if " " in message.text:
         param = message.text.split()[1]
         if param.startswith("ref_"):
             try:
-                referrer_id = int(param[4:])  # упрощённо; в реальности нужно декодировать
+                referrer_id = int(param[4:])
                 if referrer_id != user_id and user_id not in users_referrer:
                     users_referrer[user_id] = referrer_id
                     users_referrals.setdefault(referrer_id, []).append(user_id)
@@ -238,7 +240,7 @@ async def cmd_bonus(message: Message):
     )
 
 
-# ===================== ИГРЫ =====================
+# ===================== ИГРЫ (полные обработчики) =====================
 # ---------- РУЛЕТКА ----------
 roulette_numbers = list(range(0, 37))
 roulette_colors = {0: "green"}
@@ -961,12 +963,28 @@ async def process_payment(message: Message):
     )
 
 
-# ===================== ЗАПУСК =====================
-async def main():
-    logger.info("🚀 StarPlay Bot запускается...")
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+# ===================== WEBHOOK (для Bothost) =====================
+WEBHOOK_PATH = "/webhook"
+PORT = int(os.environ.get("PORT", 8000))
+
+async def on_startup():
+    # Установите URL вебхука в формате https://ваш_бот.bothost.ru/webhook
+    # Замените на реальный адрес вашего бота на Bothost
+    webhook_url = f"https://{os.environ.get('BOT_DOMAIN', 'ваш_бот.bothost.ru')}{WEBHOOK_PATH}"
+    await bot.set_webhook(webhook_url)
+    logger.info(f"Webhook set to {webhook_url}")
+
+async def on_shutdown():
+    await bot.delete_webhook()
+    await bot.session.close()
+
+def start_webhook():
+    app = web.Application()
+    app.router.post(WEBHOOK_PATH, dp.webhook_endpoint)
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    web.run_app(app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
-    asyncio.run(main())
-    
+    # Для Bothost используем webhook
+    start_webhook()
