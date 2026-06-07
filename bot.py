@@ -21,7 +21,7 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 # ===================== КОНФИГУРАЦИЯ =====================
 BOT_TOKEN = "8251949164:AAE1fYvR_cMK7PnykcqpCxaXS9vIWxo1VjQ"
-ADMIN_USERNAMES = ["tim2011", "admin"]
+ADMIN_USERNAMES = ["tim2011", "admin"]  # ADMINS по username (без @)
 
 REFERRAL_BONUS_PERCENT = 10
 REFERRAL_SIGNUP_BONUS = 5
@@ -35,8 +35,8 @@ users_stats: Dict[int, dict] = {}
 users_daily_bonus: Dict[int, str] = {}
 pending_payments: Dict[str, dict] = {}
 transactions: Dict[int, list] = {}
-users_username: Dict[int, str] = {}
-users_join_date: Dict[int, str] = {}
+users_username: Dict[int, str] = {}  # user_id -> username
+users_join_date: Dict[int, str] = {}  # user_id -> дата регистрации
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -67,6 +67,7 @@ def is_admin(username: str) -> bool:
     return username.lower() in [adm.lower() for adm in ADMIN_USERNAMES]
 
 async def get_user_id_by_username(username: str) -> Optional[int]:
+    """Поиск user_id по username"""
     for uid, uname in users_username.items():
         if uname and uname.lower() == username.lower():
             return uid
@@ -114,6 +115,7 @@ def get_random_emoji() -> str:
 
 # ===================== REPLY КЛАВИАТУРЫ =====================
 def get_main_keyboard(user_id: int = None) -> ReplyKeyboardMarkup:
+    """Главная клавиатура (под строкой ввода)"""
     builder = ReplyKeyboardBuilder()
     builder.button(text="💰 Баланс")
     builder.button(text="⭐️ Пополнить")
@@ -123,9 +125,15 @@ def get_main_keyboard(user_id: int = None) -> ReplyKeyboardMarkup:
     builder.button(text="📊 Профиль")
     builder.button(text="🎁 Бонус")
     builder.adjust(2)
+    
+    # Админские кнопки
+    if user_id:
+        user = bot._me  # не идеально, но для проверки
+        pass
     return builder.as_markup(resize_keyboard=True)
 
 def get_admin_keyboard() -> ReplyKeyboardMarkup:
+    """Админская клавиатура"""
     builder = ReplyKeyboardBuilder()
     builder.button(text="👑 Админ панель")
     builder.button(text="📊 Статистика")
@@ -136,6 +144,7 @@ def get_admin_keyboard() -> ReplyKeyboardMarkup:
     return builder.as_markup(resize_keyboard=True)
 
 def get_admin_actions_keyboard() -> InlineKeyboardMarkup:
+    """Инлайн кнопки админ-панели"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика бота", callback_data="admin_stats")],
         [InlineKeyboardButton(text="💰 Изменить баланс", callback_data="admin_change_balance")],
@@ -147,6 +156,7 @@ def get_admin_actions_keyboard() -> InlineKeyboardMarkup:
     ])
 
 def get_games_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура игр (reply)"""
     builder = ReplyKeyboardBuilder()
     builder.button(text="🎰 Рулетка")
     builder.button(text="🎯 Дартс")
@@ -161,6 +171,7 @@ def get_games_keyboard() -> ReplyKeyboardMarkup:
     return builder.as_markup(resize_keyboard=True)
 
 def get_bet_keyboard(game_name: str) -> InlineKeyboardMarkup:
+    """Inline клавиатура для выбора ставки"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⭐️ 5", callback_data=f"{game_name}_bet_5"),
          InlineKeyboardButton(text="⭐️ 10", callback_data=f"{game_name}_bet_10"),
@@ -172,6 +183,7 @@ def get_bet_keyboard(game_name: str) -> InlineKeyboardMarkup:
     ])
 
 def get_deposit_keyboard() -> InlineKeyboardMarkup:
+    """Inline клавиатура пополнения"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⭐️ 10", callback_data="deposit_10"),
          InlineKeyboardButton(text="⭐️ 50", callback_data="deposit_50"),
@@ -215,11 +227,14 @@ async def cmd_start(message: Message):
     user_id = message.from_user.id
     username = message.from_user.username or ""
     
+    # Сохраняем username
     users_username[user_id] = username
     
+    # Дата регистрации
     if user_id not in users_join_date:
         users_join_date[user_id] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
+    # Реферальная логика
     if " " in message.text:
         param = message.text.split()[1]
         if param.startswith("ref_"):
@@ -251,6 +266,7 @@ async def cmd_start(message: Message):
         f"👇 <i>Используй кнопки внизу!</i>"
     )
     
+    # Выбор клавиатуры для админа
     keyboard = get_admin_keyboard() if is_admin(username) else get_main_keyboard()
     
     await message.answer(welcome_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
@@ -370,23 +386,7 @@ async def profile_reply(message: Message):
 
 @dp.message(F.text == "🎁 Бонус")
 async def bonus_reply(message: Message):
-    user_id = message.from_user.id
-    today = datetime.now().date().isoformat()
-    if users_daily_bonus.get(user_id) == today:
-        await message.answer(
-            f"🎁 <b>Ты уже получил сегодняшний бонус!</b>\n\nВозвращайся завтра!",
-            parse_mode=ParseMode.HTML
-        )
-        return
-    bonus_amount = random.randint(5, 15)
-    update_balance(user_id, bonus_amount)
-    users_daily_bonus[user_id] = today
-    save_transaction(user_id, bonus_amount, "daily_bonus", "Ежедневный бонус")
-    await message.answer(
-        f"🎉 <b>Ежедневный бонус получен!</b> 🎉\n\n+{format_stars(bonus_amount)}\n"
-        f"💰 Новый баланс: {format_stars(get_user_balance(user_id))}",
-        parse_mode=ParseMode.HTML
-    )
+    await cmd_bonus(message)
 
 @dp.message(F.text == "👑 Админ панель")
 async def admin_panel_reply(message: Message):
@@ -419,10 +419,7 @@ async def admin_stats_reply(message: Message):
         f"💰 <b>Общий баланс:</b> {format_stars(total_balance)}\n"
         f"🎮 <b>Всего игр:</b> {total_games}\n"
         f"🏆 <b>Всего побед:</b> {total_wins}\n"
-    )
-    if total_games > 0:
-        text += f"📈 <b>Винрейт:</b> {(total_wins/total_games*100):.1f}%\n"
-    text += (
+        f"🏆 <b>Общий винрейт:</b> {(total_wins/total_games*100):.1f}%\n" if total_games > 0 else ""
         f"💸 <b>Пополнений:</b> {total_deposits}\n"
         f"💸 <b>Сумма пополнений:</b> {format_stars(deposit_sum)}\n"
     )
@@ -454,7 +451,7 @@ async def admin_change_balance_reply(message: Message, state: FSMContext):
     await message.answer(
         "💰 <b>Изменение баланса</b>\n\n"
         "Введи username игрока (без @) или ID:\n"
-        "<code>username</code> или <code>123456789</code>\n\n"
+        "<code>@username</code> или <code>123456789</code>\n\n"
         "<i>Для отмены отправь /cancel</i>",
         parse_mode=ParseMode.HTML
     )
@@ -480,7 +477,8 @@ async def back_to_main_from_games(message: Message):
     )
 
 
-# ===================== ИГРЫ =====================
+# ===================== ОБРАБОТЧИКИ ИГР =====================
+# ---------- РУЛЕТКА ----------
 roulette_numbers = list(range(0, 37))
 roulette_colors = {0: "green"}
 for i in range(1, 37):
@@ -555,6 +553,7 @@ async def roulette_play(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+# ---------- ДАРТС ----------
 @dp.message(F.text == "🎯 Дартс")
 async def darts_start(message: Message):
     await message.answer(
@@ -609,6 +608,7 @@ async def darts_play(callback: CallbackQuery):
     await callback.answer()
 
 
+# ---------- ФУТБОЛ ----------
 @dp.message(F.text == "⚽️ Футбол")
 async def football_start(message: Message):
     await message.answer(
@@ -657,6 +657,7 @@ async def football_play(callback: CallbackQuery):
     await callback.answer()
 
 
+# ---------- БОУЛИНГ ----------
 @dp.message(F.text == "🎳 Боулинг")
 async def bowling_start(message: Message):
     await message.answer(
@@ -713,6 +714,7 @@ async def bowling_play(callback: CallbackQuery):
     await callback.answer()
 
 
+# ---------- БАСКЕТБОЛ ----------
 @dp.message(F.text == "🏀 Баскетбол")
 async def basketball_start(message: Message):
     await message.answer(
@@ -1034,9 +1036,9 @@ async def slots_spin(callback: CallbackQuery):
     await callback.answer()
 
 
-# ===================== АДМИН ОБРАБОТЧИКИ =====================
+# ===================== АДМИН-ПАНЕЛЬ (CALLBACK) =====================
 @dp.callback_query(F.data == "admin_stats")
-async def admin_stats_callback(callback: CallbackQuery):
+async def admin_stats(callback: CallbackQuery):
     username = callback.from_user.username or ""
     if not is_admin(username):
         await callback.answer("Нет доступа!")
@@ -1128,10 +1130,11 @@ async def admin_logs(callback: CallbackQuery):
         await callback.answer("Нет доступа!")
         return
     
+    # Последние 20 транзакций
     all_txs = []
     for uid, tx_list in transactions.items():
         uname = users_username.get(uid, str(uid))
-        for tx in tx_list[-5:]:
+        for tx in tx_list[-5:]:  # последние 5 транзакций пользователя
             all_txs.append((tx["timestamp"], f"@{uname}: {tx['type']} {tx['amount']}⭐️ - {tx['details']}"))
     
     all_txs.sort(reverse=True)
@@ -1152,6 +1155,7 @@ async def admin_save(callback: CallbackQuery):
         await callback.answer("Нет доступа!")
         return
     
+    # Сохраняем данные в JSON
     data = {
         "balance": users_balance,
         "referrer": users_referrer,
@@ -1224,6 +1228,7 @@ async def admin_find_user(message: Message, state: FSMContext):
         await message.answer("❌ Отменено.", reply_markup=get_admin_keyboard())
         return
     
+    # Ищем пользователя
     user_id = await get_user_id_by_username(input_text)
     if not user_id:
         try:
@@ -1274,19 +1279,8 @@ async def admin_balance_action(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         return
     
-    if callback.data == "admin_balance_custom":
-        await state.set_state(GameStates.admin_change_balance)
-        await callback.message.answer(
-            "✏️ Введи сумму (можно с минусом для снятия):\n"
-            "Пример: <code>500</code> или <code>-200</code>",
-            parse_mode=ParseMode.HTML
-        )
-        await callback.answer()
-        return
-    
-    parts = callback.data.split("_")
-    action = parts[2]
-    amount = int(parts[3])
+    action = callback.data.split("_")[-2]
+    amount = int(callback.data.split("_")[-1])
     
     if action == "add":
         new_balance = update_balance(target_user, amount)
@@ -1299,7 +1293,7 @@ async def admin_balance_action(callback: CallbackQuery, state: FSMContext):
             parse_mode=ParseMode.HTML
         )
         result_text = f"✅ Добавлено +{format_stars(amount)} пользователю @{target_username}"
-    else:
+    elif action == "remove":
         new_balance = update_balance(target_user, -amount)
         save_transaction(target_user, -amount, "admin_remove", f"Админ забрал {amount} Stars")
         await bot.send_message(
@@ -1310,6 +1304,15 @@ async def admin_balance_action(callback: CallbackQuery, state: FSMContext):
             parse_mode=ParseMode.HTML
         )
         result_text = f"✅ Снято -{format_stars(amount)} у @{target_username}"
+    else:
+        await state.set_state(GameStates.admin_change_balance)
+        await callback.message.answer(
+            "✏️ Введи сумму (можно с минусом для снятия):\n"
+            "Пример: <code>500</code> или <code>-200</code>",
+            parse_mode=ParseMode.HTML
+        )
+        await callback.answer()
+        return
     
     await state.clear()
     await callback.message.edit_text(
@@ -1371,8 +1374,8 @@ async def admin_broadcast_handler(message: Message, state: FSMContext):
         await message.answer("❌ Рассылка отменена.", reply_markup=get_admin_keyboard())
         return
     
-    success = 0
-    fail = 0
+    # Отправляем рассылку
+    success = 0    fail = 0
     
     progress_msg = await message.answer("📢 Начинаю рассылку...")
     
@@ -1489,9 +1492,11 @@ async def process_custom_deposit(message: Message, state: FSMContext):
 @dp.message(Command("cancel"))
 async def cancel_handler(message: Message, state: FSMContext):
     await state.clear()
-    username = message.from_user.username or ""
-    keyboard = get_admin_keyboard() if is_admin(username) else get_main_keyboard()
-    await message.answer("❌ Действие отменено.", reply_markup=keyboard)
+    await message.answer("❌ Действие отменено.", reply_markup=get_main_keyboard(message.from_user.id))
+
+@dp.message(F.text == "/admin")
+async def admin_command(message: Message):
+    await cmd_admin(message)
 
 
 # ===================== ЗАПУСК =====================
