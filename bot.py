@@ -105,7 +105,7 @@ def get_random_emoji() -> str:
     return random.choice(["🎲","🎯","⚡️","💫","🌟","⭐️","✨","🎮","🎰","🔥"])
 
 
-# ===================== DICE МНОЖИТЕЛИ =====================
+# ===================== ЛОГИКА DICE ИГР =====================
 DICE_MULTIPLIERS = {
     "🎯": {1: 0, 2: 0, 3: 1, 4: 2, 5: 4, 6: 10},
     "⚽️": {1: 0, 2: 0, 3: 1, 4: 2, 5: 3, 6: 5},
@@ -114,10 +114,8 @@ DICE_MULTIPLIERS = {
 }
 
 GAME_NAMES = {
-    "🎯": "🎯 Дартс",
-    "⚽️": "⚽️ Футбол",
-    "🏀": "🏀 Баскетбол",
-    "🎳": "🎳 Боулинг"
+    "darts": "🎯 Дартс", "football": "⚽️ Футбол",
+    "basketball": "🏀 Баскетбол", "bowling": "🎳 Боулинг"
 }
 
 
@@ -264,6 +262,19 @@ async def cmd_start(message: Message):
     
     await message.answer(welcome_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
+@dp.message(Command("admin"))
+async def cmd_admin(message: Message):
+    username = message.from_user.username or ""
+    if not is_admin(username):
+        await message.answer("❌ У вас нет доступа к админ-панели!")
+        return
+    
+    await message.answer(
+        "👑 <b>Админ-панель</b>\n\nВыберите действие:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_admin_actions_keyboard()
+    )
+
 
 # ===================== ОБРАБОТЧИКИ REPLY КЛАВИАТУРЫ =====================
 @dp.message(F.text == "💰 Баланс")
@@ -384,6 +395,87 @@ async def bonus_reply(message: Message):
         parse_mode=ParseMode.HTML
     )
 
+@dp.message(F.text == "👑 Админ панель")
+async def admin_panel_reply(message: Message):
+    username = message.from_user.username or ""
+    if not is_admin(username):
+        await message.answer("❌ У вас нет доступа!")
+        return
+    await message.answer(
+        "👑 <b>Админ-панель</b>\n\nВыберите действие:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_admin_actions_keyboard()
+    )
+
+@dp.message(F.text == "📊 Статистика")
+async def admin_stats_reply(message: Message):
+    username = message.from_user.username or ""
+    if not is_admin(username):
+        return
+    
+    total_users = len(users_balance)
+    total_balance = sum(users_balance.values())
+    total_games = sum(s["games_played"] for s in users_stats.values())
+    total_wins = sum(s["games_won"] for s in users_stats.values())
+    total_deposits = sum(1 for tx_list in transactions.values() for tx in tx_list if tx["type"] == "deposit")
+    deposit_sum = sum(tx["amount"] for tx_list in transactions.values() for tx in tx_list if tx["type"] == "deposit")
+    
+    text = (
+        f"📊 <b>Статистика бота</b>\n\n"
+        f"👥 <b>Пользователей:</b> {total_users}\n"
+        f"💰 <b>Общий баланс:</b> {format_stars(total_balance)}\n"
+        f"🎮 <b>Всего игр:</b> {total_games}\n"
+        f"🏆 <b>Всего побед:</b> {total_wins}\n"
+    )
+    if total_games > 0:
+        text += f"📈 <b>Винрейт:</b> {(total_wins/total_games*100):.1f}%\n"
+    text += (
+        f"💸 <b>Пополнений:</b> {total_deposits}\n"
+        f"💸 <b>Сумма пополнений:</b> {format_stars(deposit_sum)}\n"
+    )
+    
+    await message.answer(text, parse_mode=ParseMode.HTML)
+
+@dp.message(F.text == "📢 Рассылка")
+async def admin_broadcast_reply(message: Message, state: FSMContext):
+    username = message.from_user.username or ""
+    if not is_admin(username):
+        return
+    
+    await state.set_state(GameStates.admin_send_message)
+    await message.answer(
+        "📢 <b>Рассылка</b>\n\n"
+        "Отправь сообщение для рассылки всем пользователям.\n"
+        "Это может быть текст, фото, видео или документ.\n\n"
+        "<i>Для отмены отправь /cancel</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+@dp.message(F.text == "💰 Изменить баланс")
+async def admin_change_balance_reply(message: Message, state: FSMContext):
+    username = message.from_user.username or ""
+    if not is_admin(username):
+        return
+    
+    await state.set_state(GameStates.admin_find_user)
+    await message.answer(
+        "💰 <b>Изменение баланса</b>\n\n"
+        "Введи username игрока (без @) или ID:\n"
+        "<code>username</code> или <code>123456789</code>\n\n"
+        "<i>Для отмены отправь /cancel</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+@dp.message(F.text == "🔙 В главное меню")
+async def back_to_main_reply(message: Message):
+    username = message.from_user.username or ""
+    keyboard = get_admin_keyboard() if is_admin(username) else get_main_keyboard()
+    await message.answer(
+        "🌟 <b>Главное меню</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
+    )
+
 @dp.message(F.text == "🔙 Главное меню")
 async def back_to_main_from_games(message: Message):
     username = message.from_user.username or ""
@@ -395,7 +487,7 @@ async def back_to_main_from_games(message: Message):
     )
 
 
-# ===================== DICE ИГРЫ (ДАРТС, ФУТБОЛ, БАСКЕТБОЛ, БОУЛИНГ) =====================
+# ===================== DICE ИГРЫ =====================
 @dp.message(F.text == "🎯 Дартс")
 async def darts_start(message: Message):
     await message.answer(
@@ -403,6 +495,27 @@ async def darts_start(message: Message):
         parse_mode=ParseMode.HTML,
         reply_markup=get_bet_keyboard("darts")
     )
+
+@dp.callback_query(F.data.startswith("darts_bet_"))
+async def darts_play_callback(callback: CallbackQuery, state: FSMContext):
+    bet = int(callback.data.split("_")[-1])
+    user_id = callback.from_user.id
+    
+    if get_user_balance(user_id) < bet:
+        await callback.answer(f"❌ Не хватает {format_stars(bet)}", show_alert=True)
+        return
+    
+    await state.update_data(dice_game_data={"game": "darts", "bet": bet, "emoji": "🎯"})
+    await callback.message.delete()
+    await callback.message.answer(
+        f"🎯 <b>Дартс</b>\n\nСтавка: {format_stars(bet)}\n"
+        f"🎯 Кидай дротик! Нажми на кнопку ниже:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎯 БРОСОК", callback_data="throw_dice")]
+        ])
+    )
+    await callback.answer()
 
 @dp.message(F.text == "⚽️ Футбол")
 async def football_start(message: Message):
@@ -412,6 +525,27 @@ async def football_start(message: Message):
         reply_markup=get_bet_keyboard("football")
     )
 
+@dp.callback_query(F.data.startswith("football_bet_"))
+async def football_play_callback(callback: CallbackQuery, state: FSMContext):
+    bet = int(callback.data.split("_")[-1])
+    user_id = callback.from_user.id
+    
+    if get_user_balance(user_id) < bet:
+        await callback.answer(f"❌ Не хватает {format_stars(bet)}", show_alert=True)
+        return
+    
+    await state.update_data(dice_game_data={"game": "football", "bet": bet, "emoji": "⚽️"})
+    await callback.message.delete()
+    await callback.message.answer(
+        f"⚽️ <b>Футбол</b>\n\nСтавка: {format_stars(bet)}\n"
+        f"⚽️ Бей пенальти! Нажми на кнопку ниже:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⚽️ УДАР", callback_data="throw_dice")]
+        ])
+    )
+    await callback.answer()
+
 @dp.message(F.text == "🏀 Баскетбол")
 async def basketball_start(message: Message):
     await message.answer(
@@ -419,6 +553,27 @@ async def basketball_start(message: Message):
         parse_mode=ParseMode.HTML,
         reply_markup=get_bet_keyboard("basketball")
     )
+
+@dp.callback_query(F.data.startswith("basketball_bet_"))
+async def basketball_play_callback(callback: CallbackQuery, state: FSMContext):
+    bet = int(callback.data.split("_")[-1])
+    user_id = callback.from_user.id
+    
+    if get_user_balance(user_id) < bet:
+        await callback.answer(f"❌ Не хватает {format_stars(bet)}", show_alert=True)
+        return
+    
+    await state.update_data(dice_game_data={"game": "basketball", "bet": bet, "emoji": "🏀"})
+    await callback.message.delete()
+    await callback.message.answer(
+        f"🏀 <b>Баскетбол</b>\n\nСтавка: {format_stars(bet)}\n"
+        f"🏀 Бросай мяч! Нажми на кнопку ниже:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🏀 БРОСОК", callback_data="throw_dice")]
+        ])
+    )
+    await callback.answer()
 
 @dp.message(F.text == "🎳 Боулинг")
 async def bowling_start(message: Message):
@@ -428,88 +583,39 @@ async def bowling_start(message: Message):
         reply_markup=get_bet_keyboard("bowling")
     )
 
-
-# Универсальный обработчик выбора ставки для dice игр
-@dp.callback_query(F.data.startswith("darts_bet_"))
-async def darts_bet(callback: CallbackQuery, state: FSMContext):
-    bet = int(callback.data.split("_")[-1])
-    if get_user_balance(callback.from_user.id) < bet:
-        await callback.answer(f"❌ Не хватает {format_stars(bet)}", show_alert=True)
-        return
-    await state.update_data(dice_emoji="🎯", dice_bet=bet, dice_game="darts")
-    await callback.message.delete()
-    await callback.message.answer(
-        f"🎯 <b>Дартс</b>\n\nСтавка: {format_stars(bet)}\nНажми на кнопку, чтобы бросить дротик:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🎯 БРОСИТЬ", callback_data="throw_dice")]
-        ])
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("football_bet_"))
-async def football_bet(callback: CallbackQuery, state: FSMContext):
-    bet = int(callback.data.split("_")[-1])
-    if get_user_balance(callback.from_user.id) < bet:
-        await callback.answer(f"❌ Не хватает {format_stars(bet)}", show_alert=True)
-        return
-    await state.update_data(dice_emoji="⚽️", dice_bet=bet, dice_game="football")
-    await callback.message.delete()
-    await callback.message.answer(
-        f"⚽️ <b>Футбол</b>\n\nСтавка: {format_stars(bet)}\nНажми на кнопку, чтобы ударить:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⚽️ УДАРИТЬ", callback_data="throw_dice")]
-        ])
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("basketball_bet_"))
-async def basketball_bet(callback: CallbackQuery, state: FSMContext):
-    bet = int(callback.data.split("_")[-1])
-    if get_user_balance(callback.from_user.id) < bet:
-        await callback.answer(f"❌ Не хватает {format_stars(bet)}", show_alert=True)
-        return
-    await state.update_data(dice_emoji="🏀", dice_bet=bet, dice_game="basketball")
-    await callback.message.delete()
-    await callback.message.answer(
-        f"🏀 <b>Баскетбол</b>\n\nСтавка: {format_stars(bet)}\nНажми на кнопку, чтобы бросить:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🏀 БРОСИТЬ", callback_data="throw_dice")]
-        ])
-    )
-    await callback.answer()
-
 @dp.callback_query(F.data.startswith("bowling_bet_"))
-async def bowling_bet(callback: CallbackQuery, state: FSMContext):
+async def bowling_play_callback(callback: CallbackQuery, state: FSMContext):
     bet = int(callback.data.split("_")[-1])
-    if get_user_balance(callback.from_user.id) < bet:
+    user_id = callback.from_user.id
+    
+    if get_user_balance(user_id) < bet:
         await callback.answer(f"❌ Не хватает {format_stars(bet)}", show_alert=True)
         return
-    await state.update_data(dice_emoji="🎳", dice_bet=bet, dice_game="bowling")
+    
+    await state.update_data(dice_game_data={"game": "bowling", "bet": bet, "emoji": "🎳"})
     await callback.message.delete()
     await callback.message.answer(
-        f"🎳 <b>Боулинг</b>\n\nСтавка: {format_stars(bet)}\nНажми на кнопку, чтобы бросить шар:",
+        f"🎳 <b>Боулинг</b>\n\nСтавка: {format_stars(bet)}\n"
+        f"🎳 Бросай шар! Нажми на кнопку ниже:",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🎳 БРОСИТЬ", callback_data="throw_dice")]
+            [InlineKeyboardButton(text="🎳 БРОСОК", callback_data="throw_dice")]
         ])
     )
     await callback.answer()
-
 
 @dp.callback_query(F.data == "throw_dice")
 async def throw_dice(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    emoji = data.get("dice_emoji")
-    bet = data.get("dice_bet")
-    game = data.get("dice_game")
+    game_data = data.get("dice_game_data")
     
-    if not emoji or not bet:
+    if not game_data:
         await callback.answer("Ошибка! Начните игру заново.", show_alert=True)
         return
     
+    game = game_data["game"]
+    bet = game_data["bet"]
+    emoji = game_data["emoji"]
     user_id = callback.from_user.id
     
     if get_user_balance(user_id) < bet:
@@ -555,7 +661,7 @@ async def throw_dice(callback: CallbackQuery, state: FSMContext):
         result_text = f"😢 <b>Проигрыш</b>\n-{format_stars(bet)}"
     
     await callback.message.answer(
-        f"{GAME_NAMES.get(emoji, '🎲')}\n\n"
+        f"{GAME_NAMES.get(game, '🎲')}\n\n"
         f"Твой результат: <b>{dice_value}</b>\n"
         f"Ставка: {format_stars(bet)}\n\n"
         f"{result_text}\n\n"
@@ -568,7 +674,6 @@ async def throw_dice(callback: CallbackQuery, state: FSMContext):
 
 
 # ===================== ОСТАЛЬНЫЕ ИГРЫ =====================
-# ---------- РУЛЕТКА ----------
 roulette_numbers = list(range(0, 37))
 roulette_colors = {0: "green"}
 for i in range(1, 37):
@@ -907,89 +1012,7 @@ async def slots_spin(callback: CallbackQuery):
     await callback.answer()
 
 
-# ===================== АДМИН ПАНЕЛЬ =====================
-@dp.message(F.text == "👑 Админ панель")
-async def admin_panel_reply(message: Message):
-    username = message.from_user.username or ""
-    if not is_admin(username):
-        await message.answer("❌ У вас нет доступа!")
-        return
-    await message.answer(
-        "👑 <b>Админ-панель</b>\n\nВыберите действие:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=get_admin_actions_keyboard()
-    )
-
-@dp.message(F.text == "📊 Статистика")
-async def admin_stats_reply(message: Message):
-    username = message.from_user.username or ""
-    if not is_admin(username):
-        return
-    
-    total_users = len(users_balance)
-    total_balance = sum(users_balance.values())
-    total_games = sum(s["games_played"] for s in users_stats.values())
-    total_wins = sum(s["games_won"] for s in users_stats.values())
-    total_deposits = sum(1 for tx_list in transactions.values() for tx in tx_list if tx["type"] == "deposit")
-    deposit_sum = sum(tx["amount"] for tx_list in transactions.values() for tx in tx_list if tx["type"] == "deposit")
-    
-    text = (
-        f"📊 <b>Статистика бота</b>\n\n"
-        f"👥 <b>Пользователей:</b> {total_users}\n"
-        f"💰 <b>Общий баланс:</b> {format_stars(total_balance)}\n"
-        f"🎮 <b>Всего игр:</b> {total_games}\n"
-        f"🏆 <b>Всего побед:</b> {total_wins}\n"
-    )
-    if total_games > 0:
-        text += f"📈 <b>Винрейт:</b> {(total_wins/total_games*100):.1f}%\n"
-    text += (
-        f"💸 <b>Пополнений:</b> {total_deposits}\n"
-        f"💸 <b>Сумма пополнений:</b> {format_stars(deposit_sum)}\n"
-    )
-    
-    await message.answer(text, parse_mode=ParseMode.HTML)
-
-@dp.message(F.text == "📢 Рассылка")
-async def admin_broadcast_reply(message: Message, state: FSMContext):
-    username = message.from_user.username or ""
-    if not is_admin(username):
-        return
-    
-    await state.set_state(GameStates.admin_send_message)
-    await message.answer(
-        "📢 <b>Рассылка</b>\n\n"
-        "Отправь сообщение для рассылки всем пользователям.\n\n"
-        "<i>Для отмены отправь /cancel</i>",
-        parse_mode=ParseMode.HTML
-    )
-
-@dp.message(F.text == "💰 Изменить баланс")
-async def admin_change_balance_reply(message: Message, state: FSMContext):
-    username = message.from_user.username or ""
-    if not is_admin(username):
-        return
-    
-    await state.set_state(GameStates.admin_find_user)
-    await message.answer(
-        "💰 <b>Изменение баланса</b>\n\n"
-        "Введи username игрока (без @):\n"
-        "<code>hjklgf1</code>\n\n"
-        "<i>Для отмены отправь /cancel</i>",
-        parse_mode=ParseMode.HTML
-    )
-
-@dp.message(F.text == "🔙 В главное меню")
-async def back_to_main_reply(message: Message):
-    username = message.from_user.username or ""
-    keyboard = get_admin_keyboard() if is_admin(username) else get_main_keyboard()
-    await message.answer(
-        "🌟 <b>Главное меню</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard
-    )
-
-
-# ===================== АДМИН CALLBACK ОБРАБОТЧИКИ =====================
+# ===================== АДМИН ОБРАБОТЧИКИ =====================
 @dp.callback_query(F.data == "admin_stats")
 async def admin_stats_callback(callback: CallbackQuery):
     username = callback.from_user.username or ""
