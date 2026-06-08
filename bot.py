@@ -227,6 +227,7 @@ async def cmd_start(message: Message):
     if user_id not in users_join_date:
         users_join_date[user_id] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
+    # Реферальная логика
     if " " in message.text:
         param = message.text.split()[1]
         if param.startswith("ref_"):
@@ -282,7 +283,8 @@ async def balance_reply(message: Message):
     user_id = message.from_user.id
     await message.answer(
         f"💰 <b>Твой баланс:</b> {format_stars(get_user_balance(user_id))}",
-        parse_mode=ParseMode.HTML
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_main_keyboard(message.from_user.username or "")
     )
 
 @dp.message(F.text == "⭐️ Пополнить")
