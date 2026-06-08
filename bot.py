@@ -14,7 +14,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     LabeledPrice, Message, CallbackQuery, InlineKeyboardMarkup,
     InlineKeyboardButton, PreCheckoutQuery, SuccessfulPayment,
-    ReplyKeyboardMarkup, KeyboardButton
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 )
 from aiogram.enums import ParseMode
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
@@ -227,7 +227,6 @@ async def cmd_start(message: Message):
     if user_id not in users_join_date:
         users_join_date[user_id] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # Реферальная логика
     if " " in message.text:
         param = message.text.split()[1]
         if param.startswith("ref_"):
@@ -625,14 +624,11 @@ async def throw_dice(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         return
     
-    # Списываем ставку
     update_balance(user_id, -bet)
     
-    # Отправляем dice
     dice_message = await callback.message.answer_dice(emoji=emoji)
     dice_value = dice_message.dice.value
     
-    # Получаем множитель
     multiplier = DICE_MULTIPLIERS.get(emoji, {}).get(dice_value, 0)
     
     if multiplier > 0:
@@ -662,6 +658,9 @@ async def throw_dice(callback: CallbackQuery, state: FSMContext):
         save_transaction(user_id, -bet, "game_loss", game)
         result_text = f"😢 <b>Проигрыш</b>\n-{format_stars(bet)}"
     
+    username = callback.from_user.username or ""
+    keyboard = get_games_keyboard()
+    
     await callback.message.answer(
         f"{GAME_NAMES.get(game, '🎲')}\n\n"
         f"Твой результат: <b>{dice_value}</b>\n"
@@ -669,7 +668,7 @@ async def throw_dice(callback: CallbackQuery, state: FSMContext):
         f"{result_text}\n\n"
         f"💰 Новый баланс: {format_stars(get_user_balance(user_id))}",
         parse_mode=ParseMode.HTML,
-        reply_markup=get_games_keyboard()
+        reply_markup=keyboard
     )
     await state.clear()
     await callback.answer()
@@ -744,7 +743,8 @@ async def roulette_play(callback: CallbackQuery, state: FSMContext):
     color_emoji = {"red":"🔴","black":"⚫️","green":"🟢"}[color]
     await callback.message.edit_text(
         f"🎰 <b>Рулетка</b>\n\nСтавка: {format_stars(bet)}\nВыпало: {result} {color_emoji}\n\n{res_text}\n\n💰 Новый баланс: {format_stars(get_user_balance(user_id))}",
-        parse_mode=ParseMode.HTML
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_games_keyboard()
     )
     await state.clear()
     await callback.answer()
@@ -810,7 +810,8 @@ async def mines_reveal(callback: CallbackQuery):
         del active_mines_games[user_id]
         await callback.message.edit_text(
             f"💣 <b>МИНЫ</b>\n\n💥 БАХ! Ты наступил на мину!\nСтавка проиграна.\n💰 Баланс: {format_stars(get_user_balance(user_id))}",
-            parse_mode=ParseMode.HTML
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_games_keyboard()
         )
     else:
         game["cells"] += 1
@@ -828,7 +829,8 @@ async def mines_reveal(callback: CallbackQuery):
             del active_mines_games[user_id]
             await callback.message.edit_text(
                 f"💣 <b>МИНЫ</b>\n\n🎉 ПОБЕДА! Очищено {game['cells']} клеток.\nВыигрыш: {format_stars(win)}\n💰 Баланс: {format_stars(get_user_balance(user_id))}",
-                parse_mode=ParseMode.HTML
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_games_keyboard()
             )
     await callback.answer()
 
@@ -850,7 +852,8 @@ async def mines_cashout(callback: CallbackQuery):
     del active_mines_games[user_id]
     await callback.message.edit_text(
         f"💣 <b>МИНЫ</b>\n\n💰 Ты забрал {format_stars(win)}!\n💰 Баланс: {format_stars(get_user_balance(user_id))}",
-        parse_mode=ParseMode.HTML
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_games_keyboard()
     )
     await callback.answer()
 
@@ -908,7 +911,8 @@ async def pyramid_up(callback: CallbackQuery):
             del active_pyramids[user_id]
             await callback.message.edit_text(
                 f"🏛 <b>ПИРАМИДА ПОБЕДА!</b>\n\n🎉 Ты покорил вершину!\nВыигрыш: {format_stars(game['current'])}\n💰 Баланс: {format_stars(get_user_balance(user_id))}",
-                parse_mode=ParseMode.HTML
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_games_keyboard()
             )
         else:
             kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -929,7 +933,8 @@ async def pyramid_up(callback: CallbackQuery):
         del active_pyramids[user_id]
         await callback.message.edit_text(
             f"🏛 <b>Пирамида</b>\n\n💔 Проигрыш! Ты рухнул.\nСтавка {format_stars(game['bet'])} потеряна.\n💰 Баланс: {format_stars(get_user_balance(user_id))}",
-            parse_mode=ParseMode.HTML
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_games_keyboard()
         )
     await callback.answer()
 
@@ -951,7 +956,8 @@ async def pyramid_cashout(callback: CallbackQuery):
     del active_pyramids[user_id]
     await callback.message.edit_text(
         f"🏛 <b>Пирамида</b>\n\n💰 Ты забрал {format_stars(win)}!\n💰 Баланс: {format_stars(get_user_balance(user_id))}",
-        parse_mode=ParseMode.HTML
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_games_keyboard()
     )
     await callback.answer()
 
@@ -1009,7 +1015,8 @@ async def slots_spin(callback: CallbackQuery):
         res = f"😢 Не повезло -{format_stars(bet)}"
     await callback.message.edit_text(
         f"🎰 <b>Слоты</b>\n\n┌─────┬─────┬─────┐\n│ {reel1}  │ {reel2}  │ {reel3}  │\n└─────┴─────┴─────┘\n\nСтавка: {format_stars(bet)}\n{res}\n\n💰 Новый баланс: {format_stars(get_user_balance(user_id))}",
-        parse_mode=ParseMode.HTML
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_slots_keyboard()
     )
     await callback.answer()
 
@@ -1169,6 +1176,7 @@ async def admin_back(callback: CallbackQuery):
 @dp.callback_query(F.data == "back_to_games")
 async def back_to_games(callback: CallbackQuery):
     await callback.message.delete()
+    username = callback.from_user.username or ""
     await callback.message.answer(
         "🎮 <b>Выбери игру</b>",
         parse_mode=ParseMode.HTML,
