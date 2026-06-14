@@ -1,8 +1,9 @@
 import asyncio
 import random
 import json
-from typing import Dict, Optional, List
+import os
 from datetime import datetime, timedelta
+from typing import Dict, Optional, List
 from collections import defaultdict
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -16,128 +17,112 @@ from telegram.ext import (
 )
 import aiohttp
 
-# ==================================================
-# ========== НАСТРАИВАЕМЫЕ КОНСТАНТЫ ==============
-# ==================================================
-
-# Токены
+# ========== КОНФИГУРАЦИЯ (ВСЕ НАСТРАИВАЕТСЯ ЗДЕСЬ) ==========
 BOT_TOKEN = "8251949164:AAEUSmnhX_S4p-vWDD4fvC6mDclV0LvIFe0"
 BOTOHUB_TOKEN = "3feed57e-9303-4343-8d87-ed8d9dd5650f"
 BOTOHUB_API_URL = "https://botohub.me/get-tasks"
-
-# ID администратора
-ADMIN_ID = 5356400377
+ADMIN_ID = 5356400377  # ID администратора
 
 # Настройки валюты
-CURRENCY_NAME = "MCoin"
-START_BALANCE = 100
-REFERRAL_REWARD = 50
-DAILY_REWARD = 25
-
-# Настройки заданий
-TASK_REWARD = 50  # Награда за выполнение задания
-TASK_HOLD_TIME = 180  # Время удержания подписки в секундах (3 минуты)
-
-# Настройки лотереи
+START_MCOINS = 100
+REWARD_FOR_TASK = 50  # Награда за выполнение задания
 LOTTERY_TICKET_PRICE = 10
 LOTTERY_DURATION_HOURS = 24
-LOTTERY_MIN_PARTICIPANTS = 3
 
 # Настройки кейсов
-CASE_PRICES = {
-    "common": 50,
-    "rare": 150,
-    "epic": 500,
-    "legendary": 1500
+CASES = {
+    "common": {
+        "name": "📦 Обычный кейс",
+        "price": 50,
+        "items": [
+            {"name": "10 MCoin", "reward": 10, "chance": 40},
+            {"name": "20 MCoin", "reward": 20, "chance": 30},
+            {"name": "50 MCoin", "reward": 50, "chance": 20},
+            {"name": "100 MCoin", "reward": 100, "chance": 9},
+            {"name": "500 MCoin (ДЖЕКПОТ!)", "reward": 500, "chance": 1}
+        ]
+    },
+    "rare": {
+        "name": "✨ Редкий кейс",
+        "price": 200,
+        "items": [
+            {"name": "50 MCoin", "reward": 50, "chance": 35},
+            {"name": "100 MCoin", "reward": 100, "chance": 30},
+            {"name": "250 MCoin", "reward": 250, "chance": 20},
+            {"name": "500 MCoin", "reward": 500, "chance": 10},
+            {"name": "1000 MCoin (ДЖЕКПОТ!)", "reward": 1000, "chance": 5}
+        ]
+    },
+    "legendary": {
+        "name": "🔥 Легендарный кейс",
+        "price": 500,
+        "items": [
+            {"name": "200 MCoin", "reward": 200, "chance": 30},
+            {"name": "500 MCoin", "reward": 500, "chance": 25},
+            {"name": "1000 MCoin", "reward": 1000, "chance": 20},
+            {"name": "2500 MCoin", "reward": 2500, "chance": 15},
+            {"name": "5000 MCoin (ДЖЕКПОТ!)", "reward": 5000, "chance": 10}
+        ]
+    }
 }
 
-CASE_REWARDS = {
-    "common": [10, 20, 30, 40, 50],
-    "rare": [50, 75, 100, 150, 200],
-    "epic": [200, 300, 500, 750, 1000],
-    "legendary": [1000, 1500, 2500, 5000, 10000]
+# Настройки игр
+GAMES = {
+    "coinflip": {"name": "🪙 Орёл/Решка", "min_bet": 10, "max_bet": 1000},
+    "dice": {"name": "🎲 Кость", "min_bet": 10, "max_bet": 1000},
+    "slots": {"name": "🎰 Слоты", "min_bet": 25, "max_bet": 500}
 }
 
-# Обязательные подписки (ID каналов)
-REQUIRED_SUBSCRIPTIONS = [
-    {"id": "@example_channel", "name": "Example Channel"},
-    # Добавьте другие каналы
+# Обязательные подписки (каналы для проверки через Botohost)
+REQUIRED_CHANNELS = [
+    {"id": "@channel1", "url": "https://t.me/channel1"},
+    {"id": "@channel2", "url": "https://t.me/channel2"}
 ]
 
-# Игровые настройки
-GAME_SLOT_COST = 10
-GAME_SLOT_PRIZES = {
-    "🍒🍒🍒": 100,
-    "🍋🍋🍋": 50,
-    "🍊🍊🍊": 75,
-    "🔔🔔🔔": 200,
-    "💎💎💎": 500
+# Структуры данных (хранятся в памяти)
+user_balances: Dict[int, int] = {}  # баланс MCoin
+user_stats: Dict[int, Dict] = defaultdict(lambda: {"tasks_completed": 0, "games_played": 0, "cases_opened": 0})
+user_lottery_tickets: Dict[int, int] = defaultdict(int)
+active_lottery: Dict = {"tickets": {}, "total_tickets": 0, "end_time": None, "prize_pool": 0}
+daily_bonus: Dict[int, str] = {}  # последняя дата получения бонуса
+referrals: Dict[int, List[int]] = defaultdict(list)
+user_referrer: Dict[int, int] = {}
+pending_tasks: Dict[int, Dict] = {}  # ожидающие проверки задания
+banned_users: set = set()  # забаненные пользователи
+admin_settings: Dict = {
+    "task_reward": REWARD_FOR_TASK,
+    "lottery_ticket_price": LOTTERY_TICKET_PRICE,
+    "mining_rate": 1  # MCoin в час за майнинг
 }
 
-GAME_DICE_COST = 5
-GAME_DICE_MULTIPLIER = 6
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+def save_data():
+    """Сохраняет данные в JSON файлы"""
+    data = {
+        "balances": user_balances,
+        "stats": dict(user_stats),
+        "lottery_tickets": dict(user_lottery_tickets),
+        "referrals": dict(referrals),
+        "user_referrer": user_referrer,
+        "banned_users": list(banned_users),
+        "admin_settings": admin_settings
+    }
+    with open("bot_data.json", "w") as f:
+        json.dump(data, f)
 
-# Настройки реферальной системы
-REFERRAL_BONUS = 25
-REFERRAL_LEVELS = [10, 25, 50, 100, 200]
-
-# ==================================================
-# ========== СТРУКТУРЫ ДАННЫХ =====================
-# ==================================================
-
-# Хранилище данных (в памяти)
-user_balances = defaultdict(int)  # Баланс пользователя
-user_stats = defaultdict(lambda: {
-    "tasks_completed": 0,
-    "total_earned": 0,
-    "referrals": [],
-    "daily_claimed": None,
-    "lottery_tickets": 0,
-    "items": [],
-    "last_slot": None
-})
-active_lottery = {
-    "id": 0,
-    "end_time": None,
-    "participants": [],
-    "prize_pool": 0,
-    "active": False
-}
-user_flood = defaultdict(list)  # Антифлуд
-
-# ==================================================
-# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==============
-# ==================================================
-
-def check_flood(user_id: int) -> bool:
-    """Проверка на флуд (не чаще 1 запроса в секунду)"""
-    now = datetime.now()
-    if user_id in user_flood:
-        last_cmd = user_flood[user_id]
-        if last_cmd and (now - last_cmd[-1]).seconds < 1:
-            return False
-    user_flood[user_id].append(now)
-    if len(user_flood[user_id]) > 5:
-        user_flood[user_id] = user_flood[user_id][-5:]
-    return True
-
-async def check_subscriptions(user_id: int, context: CallbackContext) -> bool:
-    """Проверка обязательных подписок"""
-    if not REQUIRED_SUBSCRIPTIONS:
-        return True
-    
-    try:
-        bot = context.bot
-        for channel in REQUIRED_SUBSCRIPTIONS:
-            try:
-                chat_member = await bot.get_chat_member(chat_id=channel["id"], user_id=user_id)
-                if chat_member.status in ["left", "kicked"]:
-                    return False
-            except:
-                return False
-        return True
-    except:
-        return False
+def load_data():
+    """Загружает данные из JSON файлов"""
+    global user_balances, user_stats, user_lottery_tickets, referrals, user_referrer, banned_users, admin_settings
+    if os.path.exists("bot_data.json"):
+        with open("bot_data.json", "r") as f:
+            data = json.load(f)
+            user_balances = data.get("balances", {})
+            user_stats = defaultdict(lambda: {"tasks_completed": 0, "games_played": 0, "cases_opened": 0}, data.get("stats", {}))
+            user_lottery_tickets = defaultdict(int, data.get("lottery_tickets", {}))
+            referrals = defaultdict(list, data.get("referrals", {}))
+            user_referrer = data.get("user_referrer", {})
+            banned_users = set(data.get("banned_users", []))
+            admin_settings = data.get("admin_settings", admin_settings)
 
 async def call_botohub_api(chat_id: int, is_task: bool = False, skip: bool = False,
                             gender: str = None, age: str = None) -> dict:
@@ -152,10 +137,7 @@ async def call_botohub_api(chat_id: int, is_task: bool = False, skip: bool = Fal
     if age:
         payload["age"] = age
 
-    headers = {
-        "Content-Type": "application/json",
-        "Auth": BOTOHUB_TOKEN
-    }
+    headers = {"Content-Type": "application/json", "Auth": BOTOHUB_TOKEN}
 
     async with aiohttp.ClientSession() as session:
         async with session.post(BOTOHUB_API_URL, json=payload, headers=headers) as resp:
@@ -165,827 +147,708 @@ async def call_botohub_api(chat_id: int, is_task: bool = False, skip: bool = Fal
                 error_text = await resp.text()
                 raise Exception(f"API ошибка {resp.status}: {error_text}")
 
-def get_main_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    """Главное меню с кнопками"""
-    keyboard = [
-        [InlineKeyboardButton("💰 Баланс", callback_data="balance"),
-         InlineKeyboardButton("📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton("🎮 Игры", callback_data="games_menu"),
-         InlineKeyboardButton("🎁 Задания", callback_data="tasks_menu")],
-        [InlineKeyboardButton("🎲 Лотерея", callback_data="lottery_menu"),
-         InlineKeyboardButton("📦 Кейсы", callback_data="cases_menu")],
-        [InlineKeyboardButton("👥 Рефералы", callback_data="referral_menu"),
-         InlineKeyboardButton("⭐ Ежедневная награда", callback_data="daily")],
-    ]
-    if user_id == ADMIN_ID:
-        keyboard.append([InlineKeyboardButton("👑 Админ панель", callback_data="admin_panel")])
-    return InlineKeyboardMarkup(keyboard)
+async def check_subscriptions(user_id: int) -> bool:
+    """Проверяет, подписан ли пользователь на обязательные каналы"""
+    # Здесь должна быть реальная проверка через Botostore API
+    # Для примера возвращаем True
+    return True
 
-# ==================================================
-# ========== ОСНОВНЫЕ КОМАНДЫ =====================
-# ==================================================
+async def add_mcoins(user_id: int, amount: int, reason: str = ""):
+    """Добавляет MCoin пользователю"""
+    if user_id not in user_balances:
+        user_balances[user_id] = START_MCOINS
+    user_balances[user_id] += amount
+    save_data()
+    if reason:
+        print(f"Добавлено {amount} MCoin пользователю {user_id} ({reason})")
 
+async def remove_mcoins(user_id: int, amount: int) -> bool:
+    """Снимает MCoin, возвращает True если достаточно средств"""
+    if user_balances.get(user_id, 0) >= amount:
+        user_balances[user_id] -= amount
+        save_data()
+        return True
+    return False
+
+# ========== ОСНОВНОЕ МЕНЮ ==========
 async def start(update: Update, context: CallbackContext):
-    """Обработчик команды /start"""
-    user_id = update.effective_user.id
-    user_name = update.effective_user.first_name
-    
-    # Инициализация пользователя
-    if user_balances[user_id] == 0:
-        user_balances[user_id] = START_BALANCE
-        user_stats[user_id]["total_earned"] = START_BALANCE
-    
-    # Проверка реферала
-    if context.args and len(context.args) > 0:
-        try:
-            referrer_id = int(context.args[0])
-            if referrer_id != user_id and user_stats[referrer_id]:
-                user_stats[referrer_id]["referrals"].append(user_id)
-                user_balances[referrer_id] += REFERRAL_BONUS
-                user_stats[referrer_id]["total_earned"] += REFERRAL_BONUS
-                await context.bot.send_message(
-                    referrer_id,
-                    f"🎉 Новый реферал! Вы получили {REFERRAL_BONUS} {CURRENCY_NAME}"
-                )
-        except:
-            pass
-    
-    await update.message.reply_text(
-        f"👋 Привет, {user_name}!\n\n"
-        f"Добро пожаловать в игрового бота!\n"
-        f"💰 Ваш баланс: {user_balances[user_id]} {CURRENCY_NAME}\n\n"
-        f"Используйте кнопки ниже для навигации:",
-        reply_markup=get_main_keyboard(user_id)
-    )
-
-async def balance(update: Update, context: CallbackContext):
-    """Показать баланс"""
-    query = update.callback_query
-    await query.answer()
     user_id = update.effective_user.id
     
-    await query.edit_message_text(
-        f"💰 **Ваш баланс:**\n"
-        f"{user_balances[user_id]} {CURRENCY_NAME}\n\n"
-        f"📊 **Всего заработано:** {user_stats[user_id]['total_earned']} {CURRENCY_NAME}\n"
-        f"✅ **Выполнено заданий:** {user_stats[user_id]['tasks_completed']}",
-        parse_mode="Markdown",
-        reply_markup=get_main_keyboard(user_id)
-    )
-
-async def stats(update: Update, context: CallbackContext):
-    """Показать статистику"""
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
+    if user_id in banned_users:
+        await update.message.reply_text("⛔ Вы забанены в боте!")
+        return
     
-    await query.edit_message_text(
-        f"📊 **Ваша статистика:**\n\n"
-        f"💰 Баланс: {user_balances[user_id]} {CURRENCY_NAME}\n"
-        f"✅ Выполнено заданий: {user_stats[user_id]['tasks_completed']}\n"
-        f"👥 Приглашено рефералов: {len(user_stats[user_id]['referrals'])}\n"
-        f"🎫 Лотерейных билетов: {user_stats[user_id]['lottery_tickets']}\n"
-        f"💎 Предметов в инвентаре: {len(user_stats[user_id]['items'])}",
-        parse_mode="Markdown",
-        reply_markup=get_main_keyboard(user_id)
-    )
-
-async def daily_reward(update: Update, context: CallbackContext):
-    """Ежедневная награда"""
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    
-    now = datetime.now().date()
-    last_claim = user_stats[user_id].get("daily_claimed")
-    
-    if last_claim == str(now):
-        await query.edit_message_text(
-            "❌ Вы уже получили ежедневную награду сегодня!\nВозвращайтесь завтра.",
-            reply_markup=get_main_keyboard(user_id)
+    # Проверка подписок
+    if not await check_subscriptions(user_id):
+        keyboard = []
+        for channel in REQUIRED_CHANNELS:
+            keyboard.append([InlineKeyboardButton(f"📢 Подписаться на {channel['id']}", url=channel['url'])])
+        keyboard.append([InlineKeyboardButton("✅ Проверить подписки", callback_data="check_subs")])
+        await update.message.reply_text(
+            "⚠️ Для использования бота необходимо подписаться на наши каналы!",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
     
-    user_balances[user_id] += DAILY_REWARD
-    user_stats[user_id]["total_earned"] += DAILY_REWARD
-    user_stats[user_id]["daily_claimed"] = str(now)
+    # Реферальная система
+    if context.args and context.args[0].isdigit() and int(context.args[0]) != user_id:
+        referrer_id = int(context.args[0])
+        if referrer_id not in user_referrer and referrer_id not in referrals[user_id]:
+            user_referrer[user_id] = referrer_id
+            referrals[referrer_id].append(user_id)
+            await add_mcoins(referrer_id, 50, f"реферал {user_id}")
+            await add_mcoins(user_id, 25, "приветственный бонус за реферала")
     
-    await query.edit_message_text(
-        f"⭐ **Ежедневная награда получена!**\n\n"
-        f"+{DAILY_REWARD} {CURRENCY_NAME}\n"
-        f"💰 Новый баланс: {user_balances[user_id]} {CURRENCY_NAME}",
-        parse_mode="Markdown",
-        reply_markup=get_main_keyboard(user_id)
-    )
-
-# ==================================================
-# ========== ЗАДАНИЯ BOTOHUB =======================
-# ==================================================
-
-async def tasks_menu(update: Update, context: CallbackContext):
-    """Меню заданий"""
-    query = update.callback_query
-    await query.answer()
+    # Инициализация
+    if user_id not in user_balances:
+        user_balances[user_id] = START_MCOINS
+        await add_mcoins(user_id, START_MCOINS, "приветственный бонус")
+        save_data()
     
     keyboard = [
-        [InlineKeyboardButton("📋 Обычные задания", callback_data="regular_tasks")],
-        [InlineKeyboardButton("🎯 Продвинутые задания", callback_data="advanced_tasks")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+        [InlineKeyboardButton("💰 Профиль", callback_data="profile")],
+        [InlineKeyboardButton("📋 Задания BotoHub", callback_data="tasks_menu")],
+        [InlineKeyboardButton("🎮 Игры", callback_data="games_menu")],
+        [InlineKeyboardButton("📦 Кейсы", callback_data="cases_menu")],
+        [InlineKeyboardButton("🎲 Лотерея", callback_data="lottery")],
+        [InlineKeyboardButton("⭐ Реферальная система", callback_data="referral")],
+        [InlineKeyboardButton("⛏️ Майнинг", callback_data="mining")],
+        [InlineKeyboardButton("🎁 Ежедневный бонус", callback_data="daily_bonus")]
     ]
     
-    await query.edit_message_text(
-        "🎁 **Меню заданий**\n\n"
-        "Выберите тип заданий:\n"
-        "• Обычные - получаете все задания сразу\n"
-        "• Продвинутые - по одному заданию с проверкой",
-        parse_mode="Markdown",
+    if user_id == ADMIN_ID:
+        keyboard.append([InlineKeyboardButton("👑 Админ-панель", callback_data="admin_panel")])
+    
+    await update.message.reply_text(
+        f"👋 Добро пожаловать, {update.effective_user.first_name}!\n\n"
+        f"💰 Баланс: {user_balances.get(user_id, 0)} MCoin\n\n"
+        f"Выполняй задания, играй в игры и открывай кейсы, чтобы зарабатывать MCoin!",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-async def regular_tasks(update: Update, context: CallbackContext):
-    """Обычные задания BotoHub"""
+# ========== ПРОФИЛЬ ==========
+async def profile_callback(update: Update, context: CallbackContext):
     query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
+    user_id = query.from_user.id
     
-    await query.edit_message_text("🔄 Получаем список заданий...")
+    stats = user_stats[user_id]
+    text = (
+        f"📊 **Ваш профиль**\n\n"
+        f"💰 Баланс: {user_balances.get(user_id, 0)} MCoin\n"
+        f"✅ Выполнено заданий: {stats['tasks_completed']}\n"
+        f"🎮 Сыграно игр: {stats['games_played']}\n"
+        f"📦 Открыто кейсов: {stats['cases_opened']}\n"
+        f"🎫 Лотерейных билетов: {user_lottery_tickets[user_id]}\n"
+    )
+    
+    if user_id in user_referrer:
+        text += f"\n👤 Пригласил: @{user_referrer[user_id]}"
+    
+    await query.message.edit_text(text, parse_mode="Markdown")
+    await query.answer()
+
+# ========== ЗАДАНИЯ BOTOHUB ==========
+async def tasks_menu_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    keyboard = [
+        [InlineKeyboardButton("📋 Обычные задания", callback_data="regular_tasks")],
+        [InlineKeyboardButton("⭐ Продвинутые задания", callback_data="advanced_tasks")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]
+    ]
+    await query.message.edit_text(
+        "📋 **Выберите тип заданий:**\n\n"
+        "Обычные - получаете все задания сразу\n"
+        "Продвинутые - задания по одному с проверкой",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    await query.answer()
+
+async def regular_tasks(update: Update, context: CallbackContext):
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    await query.message.edit_text("🔄 Получаем список заданий...")
     
     try:
         result = await call_botohub_api(user_id, is_task=False)
         tasks = result.get("tasks", [])
         
         if not tasks:
-            await query.edit_message_text(
-                "🎉 На данный момент нет активных заданий.",
-                reply_markup=get_main_keyboard(user_id)
-            )
+            await query.message.edit_text("🎉 На данный момент нет активных заданий!")
             return
         
         for url in tasks:
+            keyboard = [[InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_task_{url}")]]
             await query.message.reply_text(
-                f"📌 **Задание:**\n{url}\n\n"
-                f"💰 Награда: {TASK_REWARD} {CURRENCY_NAME}\n"
-                f"⏱ Время удержания: {TASK_HOLD_TIME//60} минут\n\n"
-                f"После выполнения нажмите /check_task_{url.split('/')[-1]}",
-                parse_mode="Markdown",
-                disable_web_page_preview=True
+                f"📌 **Задание:**\n{url}\n\nНаграда: +{admin_settings['task_reward']} MCoin",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                disable_web_page_preview=True,
+                parse_mode="Markdown"
             )
         
-        # Сохраняем задания для проверки
-        context.user_data["pending_tasks"] = tasks
-        
+        await query.message.edit_text("✅ Задания отправлены!")
     except Exception as e:
-        await query.edit_message_text(f"❌ Ошибка: {e}")
+        await query.message.edit_text(f"❌ Ошибка: {e}")
+    
+    await query.answer()
 
 async def advanced_tasks(update: Update, context: CallbackContext):
-    """Продвинутые задания"""
     query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
+    user_id = query.from_user.id
     
-    await query.edit_message_text("🔄 Получаем задание...")
+    await query.message.edit_text("🔄 Получаем задание...")
     
     try:
         result = await call_botohub_api(user_id, is_task=True)
         tasks = result.get("tasks", [])
         
         if not tasks:
-            await query.edit_message_text(
-                "🎉 Нет заданий для выполнения.",
-                reply_markup=get_main_keyboard(user_id)
-            )
+            await query.message.edit_text("🎉 На данный момент нет заданий!")
             return
         
         task_url = tasks[0]
-        context.user_data["current_task"] = task_url
+        pending_tasks[user_id] = {"url": task_url, "timestamp": datetime.now()}
         
         keyboard = [
-            [InlineKeyboardButton("✅ Проверить выполнение", callback_data="check_advanced_task")],
-            [InlineKeyboardButton("❌ Пропустить", callback_data="skip_advanced_task")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="tasks_menu")]
+            [InlineKeyboardButton("✅ Я выполнил", callback_data="check_advanced_task")],
+            [InlineKeyboardButton("❌ Пропустить", callback_data="skip_advanced_task")]
         ]
         
-        await query.edit_message_text(
-            f"🎯 **Продвинутое задание**\n\n"
-            f"📢 Подпишитесь на канал:\n{task_url}\n\n"
-            f"💰 Награда: {TASK_REWARD} {CURRENCY_NAME}\n"
-            f"⏱ Время удержания: {TASK_HOLD_TIME//60} минут\n\n"
-            f"После подписки нажмите «Проверить выполнение»",
-            parse_mode="Markdown",
+        await query.message.edit_text(
+            f"📢 **Продвинутое задание:**\n{task_url}\n\n"
+            f"1. Перейдите по ссылке\n"
+            f"2. Подпишитесь на канал\n"
+            f"3. Нажмите «Я выполнил»\n\n"
+            f"🏆 Награда: +{admin_settings['task_reward']} MCoin",
+            reply_markup=InlineKeyboardMarkup(keyboard),
             disable_web_page_preview=True,
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            parse_mode="Markdown"
         )
-        
     except Exception as e:
-        await query.edit_message_text(f"❌ Ошибка: {e}")
+        await query.message.edit_text(f"❌ Ошибка: {e}")
+    
+    await query.answer()
 
 async def check_advanced_task(update: Update, context: CallbackContext):
-    """Проверка выполнения продвинутого задания"""
     query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
+    user_id = query.from_user.id
     
-    await query.edit_message_text("🔍 Проверяем выполнение...")
+    if user_id not in pending_tasks:
+        await query.answer("Нет активных заданий!")
+        return
+    
+    await query.message.edit_text("🔍 Проверяем выполнение...")
     
     try:
         result = await call_botohub_api(user_id, is_task=True)
-        prev_success = result.get("prev_success", False)
         
-        if prev_success:
+        if result.get("prev_success", False):
             # Задание выполнено
-            reward = TASK_REWARD
-            user_balances[user_id] += reward
+            reward = admin_settings['task_reward']
+            await add_mcoins(user_id, reward, "выполнение задания")
             user_stats[user_id]["tasks_completed"] += 1
-            user_stats[user_id]["total_earned"] += reward
+            del pending_tasks[user_id]
             
-            await query.edit_message_text(
+            await query.message.edit_text(
                 f"✅ **Задание выполнено!**\n\n"
-                f"+{reward} {CURRENCY_NAME}\n"
-                f"💰 Новый баланс: {user_balances[user_id]} {CURRENCY_NAME}",
-                parse_mode="Markdown",
-                reply_markup=get_main_keyboard(user_id)
+                f"💰 Вы получили: +{reward} MCoin\n"
+                f"📊 Новый баланс: {user_balances[user_id]} MCoin"
             )
         else:
             # Задание не выполнено
-            task_url = context.user_data.get("current_task")
-            await query.edit_message_text(
-                f"❌ **Задание не выполнено**\n\n"
-                f"Вы не подписаны на канал:\n{task_url}\n\n"
-                f"Пожалуйста, подпишитесь и нажмите проверку снова.",
-                parse_mode="Markdown",
-                disable_web_page_preview=True
+            await query.message.edit_text(
+                f"❌ **Задание не выполнено!**\n\n"
+                f"Пожалуйста, убедитесь что вы:\n"
+                f"1. Подписались на канал\n"
+                f"2. Подождали 3 минуты\n\n"
+                f"После выполнения нажмите кнопку снова."
             )
-            
     except Exception as e:
-        await query.edit_message_text(f"❌ Ошибка: {e}")
+        await query.message.edit_text(f"❌ Ошибка: {e}")
+    
+    await query.answer()
 
 async def skip_advanced_task(update: Update, context: CallbackContext):
-    """Пропуск задания"""
     query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
+    user_id = query.from_user.id
     
-    try:
-        await call_botohub_api(user_id, is_task=True, skip=True)
-        await query.edit_message_text(
-            "⏩ Задание пропущено.\n\n"
-            "Нажмите /start для продолжения",
-            reply_markup=get_main_keyboard(user_id)
-        )
-    except Exception as e:
-        await query.edit_message_text(f"❌ Ошибка: {e}")
+    if user_id in pending_tasks:
+        del pending_tasks[user_id]
+    
+    await query.message.edit_text("⏩ Задание пропущено! Начните новое командой /tasks")
+    await query.answer()
 
-# ==================================================
-# ========== ИГРЫ ==================================
-# ==================================================
-
-async def games_menu(update: Update, context: CallbackContext):
-    """Меню игр"""
+async def complete_task_callback(update: Update, context: CallbackContext):
     query = update.callback_query
+    user_id = query.from_user.id
+    task_url = query.data.replace("complete_task_", "")
+    
+    await add_mcoins(user_id, admin_settings['task_reward'], "выполнение задания")
+    user_stats[user_id]["tasks_completed"] += 1
+    
+    await query.message.edit_text(
+        f"✅ **Задание выполнено!**\n\n"
+        f"💰 Вы получили: +{admin_settings['task_reward']} MCoin\n"
+        f"📊 Новый баланс: {user_balances[user_id]} MCoin"
+    )
     await query.answer()
+
+# ========== ИГРЫ ==========
+async def games_menu_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    keyboard = []
     
-    keyboard = [
-        [InlineKeyboardButton("🎰 Слоты", callback_data="game_slots"),
-         InlineKeyboardButton("🎲 Кости", callback_data="game_dice")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-    ]
+    for game_id, game_info in GAMES.items():
+        keyboard.append([InlineKeyboardButton(game_info['name'], callback_data=f"game_{game_id}")])
     
-    await query.edit_message_text(
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="main_menu")])
+    
+    await query.message.edit_text(
         "🎮 **Выберите игру:**\n\n"
-        f"🎰 Слоты - {GAME_SLOT_COST} {CURRENCY_NAME} за спин\n"
-        f"🎲 Кости - {GAME_DICE_COST} {CURRENCY_NAME} за бросок",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        "Играйте и выигрывайте MCoin!",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
     )
-
-async def game_slots(update: Update, context: CallbackContext):
-    """Игра в слоты"""
-    query = update.callback_query
     await query.answer()
+
+async def game_coinflip(update: Update, context: CallbackContext, bet: int):
     user_id = update.effective_user.id
     
-    if user_balances[user_id] < GAME_SLOT_COST:
-        await query.edit_message_text(
-            f"❌ Недостаточно средств! Нужно {GAME_SLOT_COST} {CURRENCY_NAME}",
-            reply_markup=get_main_keyboard(user_id)
-        )
-        return
+    if bet < GAMES["coinflip"]["min_bet"] or bet > GAMES["coinflip"]["max_bet"]:
+        return "❌ Неверная ставка!"
     
-    user_balances[user_id] -= GAME_SLOT_COST
+    if not await remove_mcoins(user_id, bet):
+        return "❌ Недостаточно MCoin!"
     
-    # Генерация результатов
-    symbols = ["🍒", "🍋", "🍊", "🔔", "💎"]
-    results = [random.choice(symbols) for _ in range(3)]
-    result_str = "".join(results)
+    result = random.choice(["Орёл", "Решка"])
+    user_choice = random.choice(["Орёл", "Решка"])
     
-    prize = GAME_SLOT_PRIZES.get(result_str, 0)
-    
-    if prize > 0:
-        user_balances[user_id] += prize
-        user_stats[user_id]["total_earned"] += prize
-        message = f"🎉 **ПОБЕДА!**\n{result_str}\n\nВы выиграли {prize} {CURRENCY_NAME}!"
+    if result == user_choice:
+        win = bet * 2
+        await add_mcoins(user_id, win, "выигрыш в Coinflip")
+        user_stats[user_id]["games_played"] += 1
+        return f"🪙 {result}! Вы угадали!\n💰 Выигрыш: +{win} MCoin"
     else:
-        message = f"😢 **ПРОИГРЫШ**\n{result_str}\n\nПопробуйте еще раз!"
-    
-    await query.edit_message_text(
-        f"{message}\n\n💰 Баланс: {user_balances[user_id]} {CURRENCY_NAME}\n"
-        f"🎰 Ставка: {GAME_SLOT_COST} {CURRENCY_NAME}",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎰 Еще раз", callback_data="game_slots")],
-            [InlineKeyboardButton("🔙 В меню игр", callback_data="games_menu")]
-        ])
-    )
+        user_stats[user_id]["games_played"] += 1
+        return f"🪙 {result}... Вы проиграли.\n💸 Потеряно: -{bet} MCoin"
 
-async def game_dice(update: Update, context: CallbackContext):
-    """Игра в кости"""
-    query = update.callback_query
-    await query.answer()
+async def game_dice(update: Update, context: CallbackContext, bet: int):
     user_id = update.effective_user.id
     
-    if user_balances[user_id] < GAME_DICE_COST:
-        await query.edit_message_text(
-            f"❌ Недостаточно средств! Нужно {GAME_DICE_COST} {CURRENCY_NAME}",
-            reply_markup=get_main_keyboard(user_id)
-        )
-        return
+    if bet < GAMES["dice"]["min_bet"] or bet > GAMES["dice"]["max_bet"]:
+        return "❌ Неверная ставка!"
     
-    user_balances[user_id] -= GAME_DICE_COST
+    if not await remove_mcoins(user_id, bet):
+        return "❌ Недостаточно MCoin!"
     
     player_roll = random.randint(1, 6)
     bot_roll = random.randint(1, 6)
     
     if player_roll > bot_roll:
-        win = GAME_DICE_COST * GAME_DICE_MULTIPLIER
-        user_balances[user_id] += win
-        user_stats[user_id]["total_earned"] += win
-        message = f"🎉 **ВЫ ПОБЕДИЛИ!**\n\nВаш бросок: {player_roll}\nБот: {bot_roll}\nВы выиграли {win} {CURRENCY_NAME}!"
+        win = bet * 2
+        await add_mcoins(user_id, win, "выигрыш в Dice")
+        user_stats[user_id]["games_played"] += 1
+        return f"🎲 Ваша кость: {player_roll}\n🤖 Кость бота: {bot_roll}\n✅ Вы победили!\n💰 Выигрыш: +{win} MCoin"
     elif player_roll < bot_roll:
-        message = f"😢 **ВЫ ПРОИГРАЛИ**\n\nВаш бросок: {player_roll}\nБот: {bot_roll}\nПопробуйте еще раз!"
+        user_stats[user_id]["games_played"] += 1
+        return f"🎲 Ваша кость: {player_roll}\n🤖 Кость бота: {bot_roll}\n❌ Вы проиграли!\n💸 Потеряно: -{bet} MCoin"
     else:
-        user_balances[user_id] += GAME_DICE_COST
-        message = f"🤝 **НИЧЬЯ!**\n\nВаш бросок: {player_roll}\nБот: {bot_roll}\nСтавка возвращена."
-    
-    await query.edit_message_text(
-        f"{message}\n\n💰 Баланс: {user_balances[user_id]} {CURRENCY_NAME}",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎲 Еще раз", callback_data="game_dice")],
-            [InlineKeyboardButton("🔙 В меню игр", callback_data="games_menu")]
-        ])
-    )
+        await add_mcoins(user_id, bet, "ничья в Dice")
+        return f"🎲 Ваша кость: {player_roll}\n🤖 Кость бота: {bot_roll}\n🤝 Ничья! Ставка возвращена."
 
-# ==================================================
-# ========== ЛОТЕРЕЯ ===============================
-# ==================================================
-
-async def lottery_menu(update: Update, context: CallbackContext):
-    """Меню лотереи"""
-    query = update.callback_query
-    await query.answer()
+async def game_slots(update: Update, context: CallbackContext, bet: int):
     user_id = update.effective_user.id
     
-    if not active_lottery["active"]:
-        await query.edit_message_text(
-            "🎲 **Лотерея не активна**\n\n"
-            f"Создайте новую лотерею с помощью команды /create_lottery (только для админа)",
-            parse_mode="Markdown",
-            reply_markup=get_main_keyboard(user_id)
-        )
+    if bet < GAMES["slots"]["min_bet"] or bet > GAMES["slots"]["max_bet"]:
+        return "❌ Неверная ставка!"
+    
+    if not await remove_mcoins(user_id, bet):
+        return "❌ Недостаточно MCoin!"
+    
+    slots = ["🍒", "🍋", "🍊", "7️⃣", "💎"]
+    result = [random.choice(slots) for _ in range(3)]
+    
+    if result[0] == result[1] == result[2]:
+        win = bet * 5
+        await add_mcoins(user_id, win, "ДЖЕКПОТ в Слотах")
+        user_stats[user_id]["games_played"] += 1
+        return f"🎰 {' | '.join(result)}\n\n🎉 **ДЖЕКПОТ!**\n💰 Выигрыш: +{win} MCoin"
+    elif result[0] == result[1] or result[1] == result[2]:
+        win = bet * 2
+        await add_mcoins(user_id, win, "выигрыш в Слотах")
+        user_stats[user_id]["games_played"] += 1
+        return f"🎰 {' | '.join(result)}\n\n✅ Выигрыш!\n💰 +{win} MCoin"
+    else:
+        user_stats[user_id]["games_played"] += 1
+        return f"🎰 {' | '.join(result)}\n\n❌ Проигрыш!\n💸 -{bet} MCoin"
+
+# ========== КЕЙСЫ ==========
+async def cases_menu_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    keyboard = []
+    
+    for case_id, case_info in CASES.items():
+        keyboard.append([InlineKeyboardButton(f"{case_info['name']} - {case_info['price']} MCoin", callback_data=f"open_case_{case_id}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="main_menu")])
+    
+    await query.message.edit_text(
+        "📦 **Выберите кейс для открытия:**\n\n"
+        "Каждый кейс содержит разные предметы и шансы!",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    await query.answer()
+
+async def open_case(update: Update, context: CallbackContext, case_id: str):
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    if case_id not in CASES:
+        await query.answer("Кейс не найден!")
         return
     
-    remaining = active_lottery["end_time"] - datetime.now()
-    hours = remaining.seconds // 3600
-    minutes = (remaining.seconds % 3600) // 60
+    case = CASES[case_id]
+    price = case["price"]
+    
+    if not await remove_mcoins(user_id, price):
+        await query.answer("❌ Недостаточно MCoin!", show_alert=True)
+        return
+    
+    # Выбор предмета с учетом шансов
+    rand = random.randint(1, 100)
+    cumulative = 0
+    selected_item = None
+    
+    for item in case["items"]:
+        cumulative += item["chance"]
+        if rand <= cumulative:
+            selected_item = item
+            break
+    
+    reward = selected_item["reward"]
+    await add_mcoins(user_id, reward, f"открытие кейса {case['name']}")
+    user_stats[user_id]["cases_opened"] += 1
+    
+    await query.message.edit_text(
+        f"🎉 **Вы открыли {case['name']}**\n\n"
+        f"📦 Вам выпало: {selected_item['name']}\n"
+        f"💰 Награда: +{reward} MCoin\n\n"
+        f"📊 Новый баланс: {user_balances[user_id]} MCoin",
+        parse_mode="Markdown"
+    )
+    await query.answer()
+
+# ========== ЛОТЕРЕЯ ==========
+async def lottery_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    
+    if active_lottery["end_time"] is None or datetime.now() > active_lottery["end_time"]:
+        # Создаем новую лотерею
+        active_lottery["end_time"] = datetime.now() + timedelta(hours=LOTTERY_DURATION_HOURS)
+        active_lottery["prize_pool"] = 1000  # Стартовый призовой фонд
+        active_lottery["tickets"] = {}
+        active_lottery["total_tickets"] = 0
+    
+    time_left = active_lottery["end_time"] - datetime.now()
+    hours = time_left.seconds // 3600
+    minutes = (time_left.seconds % 3600) // 60
     
     keyboard = [
-        [InlineKeyboardButton(f"🎫 Купить билет ({LOTTERY_TICKET_PRICE} {CURRENCY_NAME})", 
-                            callback_data="buy_ticket")],
-        [InlineKeyboardButton("📊 Информация", callback_data="lottery_info")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+        [InlineKeyboardButton(f"🎫 Купить билет ({admin_settings['lottery_ticket_price']} MCoin)", callback_data="buy_ticket")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]
     ]
     
-    await query.edit_message_text(
-        f"🎲 **Текущая лотерея**\n\n"
-        f"💰 Призовой фонд: {active_lottery['prize_pool']} {CURRENCY_NAME}\n"
-        f"👥 Участников: {len(active_lottery['participants'])}\n"
-        f"⏱ Осталось времени: {hours}ч {minutes}мин\n"
-        f"🎫 Ваши билеты: {user_stats[user_id]['lottery_tickets']}",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    await query.message.edit_text(
+        f"🎲 **Лотерея**\n\n"
+        f"💰 Призовой фонд: {active_lottery['prize_pool']} MCoin\n"
+        f"🎫 Билетов продано: {active_lottery['total_tickets']}\n"
+        f"⏰ До розыгрыша: {hours}ч {minutes}мин\n\n"
+        f"Цена билета: {admin_settings['lottery_ticket_price']} MCoin\n"
+        f"Победитель получит 70% призового фонда!",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
     )
+    await query.answer()
 
 async def buy_ticket(update: Update, context: CallbackContext):
-    """Покупка лотерейного билета"""
     query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
+    user_id = query.from_user.id
     
-    if not active_lottery["active"]:
-        await query.edit_message_text("❌ Лотерея не активна!", reply_markup=get_main_keyboard(user_id))
+    price = admin_settings["lottery_ticket_price"]
+    
+    if not await remove_mcoins(user_id, price):
+        await query.answer("❌ Недостаточно MCoin!", show_alert=True)
         return
     
-    if user_balances[user_id] < LOTTERY_TICKET_PRICE:
-        await query.edit_message_text(
-            f"❌ Недостаточно средств! Нужно {LOTTERY_TICKET_PRICE} {CURRENCY_NAME}",
-            reply_markup=get_main_keyboard(user_id)
-        )
-        return
+    user_lottery_tickets[user_id] += 1
+    active_lottery["tickets"][user_id] = active_lottery["tickets"].get(user_id, 0) + 1
+    active_lottery["total_tickets"] += 1
+    active_lottery["prize_pool"] += price
     
-    user_balances[user_id] -= LOTTERY_TICKET_PRICE
-    user_stats[user_id]["lottery_tickets"] += 1
-    active_lottery["prize_pool"] += LOTTERY_TICKET_PRICE
-    active_lottery["participants"].append(user_id)
-    
-    await query.edit_message_text(
-        f"✅ **Билет куплен!**\n\n"
-        f"💰 Ваш баланс: {user_balances[user_id]} {CURRENCY_NAME}\n"
-        f"🎫 Билетов: {user_stats[user_id]['lottery_tickets']}\n"
-        f"🎲 Общий призовой фонд: {active_lottery['prize_pool']} {CURRENCY_NAME}",
-        parse_mode="Markdown",
-        reply_markup=get_main_keyboard(user_id)
-    )
+    await query.answer(f"✅ Билет куплен! У вас {user_lottery_tickets[user_id]} билетов", show_alert=True)
+    await lottery_callback(update, context)
 
-async def lottery_info(update: Update, context: CallbackContext):
-    """Информация о лотерее"""
+# ========== РЕФЕРАЛЫ ==========
+async def referral_callback(update: Update, context: CallbackContext):
     query = update.callback_query
-    await query.answer()
+    user_id = query.from_user.id
     
-    await query.edit_message_text(
-        f"📊 **Детали лотереи**\n\n"
-        f"💰 Призовой фонд: {active_lottery['prize_pool']} {CURRENCY_NAME}\n"
-        f"👥 Участников: {len(active_lottery['participants'])}\n"
-        f"🎫 Цена билета: {LOTTERY_TICKET_PRICE} {CURRENCY_NAME}\n"
-        f"🏆 Минимальное количество участников: {LOTTERY_MIN_PARTICIPANTS}\n\n"
-        f"Победитель получит 100% призового фонда!",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔙 Назад", callback_data="lottery_menu")
-        ]])
-    )
-
-# ==================================================
-# ========== КЕЙСЫ =================================
-# ==================================================
-
-async def cases_menu(update: Update, context: CallbackContext):
-    """Меню кейсов"""
-    query = update.callback_query
-    await query.answer()
-    
-    keyboard = []
-    for case_type, price in CASE_PRICES.items():
-        keyboard.append([InlineKeyboardButton(
-            f"📦 {case_type.upper()} кейс - {price} {CURRENCY_NAME}", 
-            callback_data=f"open_case_{case_type}"
-        )])
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
-    
-    await query.edit_message_text(
-        f"🎁 **Открытие кейсов**\n\n"
-        f"Выберите тип кейса:\n"
-        f"• Common - шанс получить 10-50 {CURRENCY_NAME}\n"
-        f"• Rare - шанс получить 50-200 {CURRENCY_NAME}\n"
-        f"• Epic - шанс получить 200-1000 {CURRENCY_NAME}\n"
-        f"• Legendary - шанс получить 1000-10000 {CURRENCY_NAME}",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def open_case(update: Update, context: CallbackContext, case_type: str):
-    """Открытие кейса"""
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    
-    price = CASE_PRICES.get(case_type)
-    if not price:
-        await query.edit_message_text("❌ Неверный тип кейса!")
-        return
-    
-    if user_balances[user_id] < price:
-        await query.edit_message_text(
-            f"❌ Недостаточно средств! Нужно {price} {CURRENCY_NAME}",
-            reply_markup=get_main_keyboard(user_id)
-        )
-        return
-    
-    user_balances[user_id] -= price
-    
-    rewards = CASE_REWARDS[case_type]
-    reward = random.choice(rewards)
-    user_balances[user_id] += reward
-    user_stats[user_id]["total_earned"] += reward
-    
-    await query.edit_message_text(
-        f"🎉 **Вы открыли {case_type.upper()} кейс!**\n\n"
-        f"💰 Вы получили: +{reward} {CURRENCY_NAME}\n"
-        f"💎 Новый баланс: {user_balances[user_id]} {CURRENCY_NAME}",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("📦 Открыть еще", callback_data="cases_menu"),
-            InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")
-        ]])
-    )
-
-# ==================================================
-# ========== РЕФЕРАЛЬНАЯ СИСТЕМА ===================
-# ==================================================
-
-async def referral_menu(update: Update, context: CallbackContext):
-    """Реферальное меню"""
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    
-    bot_username = (await context.bot.get_me()).username
+    bot_username = context.bot.username
     referral_link = f"https://t.me/{bot_username}?start={user_id}"
+    referrer_count = len(referrals[user_id])
     
-    referral_count = len(user_stats[user_id]["referrals"])
-    next_bonus = next((level for level in REFERRAL_LEVELS if level > referral_count), None)
-    
-    keyboard = [
-        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-    ]
-    
-    await query.edit_message_text(
-        f"👥 **Реферальная система**\n\n"
-        f"Приглашайте друзей и получайте бонусы!\n\n"
-        f"💰 За каждого реферала: +{REFERRAL_BONUS} {CURRENCY_NAME}\n"
-        f"👥 Ваших рефералов: {referral_count}\n\n"
-        f"🏆 Следующая награда: {next_bonus} рефералов\n\n"
+    await query.message.edit_text(
+        f"⭐ **Реферальная система**\n\n"
+        f"👥 Приглашено друзей: {referrer_count}\n"
+        f"💰 За каждого друга вы получаете: 50 MCoin\n"
+        f"🎁 Друг получает: 25 MCoin\n\n"
         f"🔗 **Ваша реферальная ссылка:**\n"
         f"`{referral_link}`\n\n"
-        f"Поделитесь ссылкой с друзьями!",
+        f"Поделитесь ссылкой с друзьями и получайте бонусы!",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        disable_web_page_preview=True
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]])
     )
-
-# ==================================================
-# ========== АДМИН ПАНЕЛЬ ==========================
-# ==================================================
-
-async def admin_panel(update: Update, context: CallbackContext):
-    """Админ панель"""
-    query = update.callback_query
     await query.answer()
-    user_id = update.effective_user.id
+
+# ========== МАЙНИНГ ==========
+async def mining_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    keyboard = [
+        [InlineKeyboardButton("⛏️ Начать майнинг (1 час)", callback_data="start_mining")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]
+    ]
+    
+    await query.message.edit_text(
+        f"⛏️ **Майнинг MCoin**\n\n"
+        f"💰 Скорость майнинга: {admin_settings['mining_rate']} MCoin/час\n"
+        f"📊 Ваш баланс: {user_balances.get(user_id, 0)} MCoin\n\n"
+        f"Нажмите «Начать майнинг» и получите награду через час!",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    await query.answer()
+
+async def start_mining(update: Update, context: CallbackContext):
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    if "mining_end" in context.user_data and datetime.now() < context.user_data["mining_end"]:
+        time_left = context.user_data["mining_end"] - datetime.now()
+        minutes = time_left.seconds // 60
+        await query.answer(f"Майнинг уже идет! Осталось {minutes} минут", show_alert=True)
+        return
+    
+    context.user_data["mining_end"] = datetime.now() + timedelta(hours=1)
+    
+    await query.message.edit_text(
+        f"⛏️ **Майнинг начат!**\n\n"
+        f"Через 1 час вы получите {admin_settings['mining_rate']} MCoin.\n"
+        f"Вернитесь в меню майнинга через час!",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="mining")]])
+    )
+    await query.answer()
+
+# ========== ЕЖЕДНЕВНЫЙ БОНУС ==========
+async def daily_bonus_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    if daily_bonus.get(user_id) == today:
+        await query.answer("Вы уже получали бонус сегодня!", show_alert=True)
+        return
+    
+    bonus = random.randint(50, 200)
+    await add_mcoins(user_id, bonus, "ежедневный бонус")
+    daily_bonus[user_id] = today
+    
+    await query.message.edit_text(
+        f"🎁 **Ежедневный бонус получен!**\n\n"
+        f"💰 Вы получили: +{bonus} MCoin\n"
+        f"📊 Новый баланс: {user_balances[user_id]} MCoin",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]])
+    )
+    await query.answer()
+
+# ========== АДМИН-ПАНЕЛЬ ==========
+async def admin_panel_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    user_id = query.from_user.id
     
     if user_id != ADMIN_ID:
-        await query.edit_message_text("❌ У вас нет доступа к админ панели!")
+        await query.answer("⛔ Доступ запрещен!", show_alert=True)
         return
     
     keyboard = [
-        [InlineKeyboardButton("💰 Выдать валюту", callback_data="admin_give")],
-        [InlineKeyboardButton("📊 Статистика бота", callback_data="admin_stats")],
-        [InlineKeyboardButton("🎲 Создать лотерею", callback_data="admin_create_lottery")],
+        [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton("💰 Выдать MCoin", callback_data="admin_give")],
+        [InlineKeyboardButton("⚙️ Настройки", callback_data="admin_settings_menu")],
         [InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast")],
-        [InlineKeyboardButton("⚙️ Настройки", callback_data="admin_settings")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+        [InlineKeyboardButton("🔨 Забанить/Разбанить", callback_data="admin_ban")],
+        [InlineKeyboardButton("🎁 Создать промокод", callback_data="admin_promo")],
+        [InlineKeyboardButton("👥 Список пользователей", callback_data="admin_users")],
+        [InlineKeyboardButton("🎲 Завершить лотерею", callback_data="admin_end_lottery")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]
     ]
     
-    await query.edit_message_text(
-        "👑 **Админ панель**\n\n"
+    await query.message.edit_text(
+        "👑 **Админ-панель**\n\n"
         "Выберите действие:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
     )
-
-async def admin_give(update: Update, context: CallbackContext):
-    """Выдача валюты (админ)"""
-    query = update.callback_query
     await query.answer()
-    
-    await query.edit_message_text(
-        "💰 **Выдача валюты**\n\n"
-        "Используйте команду:\n"
-        `/give <user_id> <amount>\n\n`
-        f"Пример: `/give 123456789 100`",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")
-        ]])
-    )
-
-async def admin_create_lottery(update: Update, context: CallbackContext):
-    """Создание лотереи (админ)"""
-    query = update.callback_query
-    await query.answer()
-    
-    active_lottery["active"] = True
-    active_lottery["id"] += 1
-    active_lottery["end_time"] = datetime.now() + timedelta(hours=LOTTERY_DURATION_HOURS)
-    active_lottery["participants"] = []
-    active_lottery["prize_pool"] = 0
-    
-    await query.edit_message_text(
-        f"✅ **Лотерея создана!**\n\n"
-        f"Длительность: {LOTTERY_DURATION_HOURS} часов\n"
-        f"Минимальное количество участников: {LOTTERY_MIN_PARTICIPANTS}\n"
-        f"Цена билета: {LOTTERY_TICKET_PRICE} {CURRENCY_NAME}\n\n"
-        f"Лотерея автоматически завершится через {LOTTERY_DURATION_HOURS} часов.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")
-        ]])
-    )
 
 async def admin_stats(update: Update, context: CallbackContext):
-    """Статистика бота"""
     query = update.callback_query
-    await query.answer()
     
     total_users = len(user_balances)
-    total_currency = sum(user_balances.values())
+    total_mcoins = sum(user_balances.values())
     total_tasks = sum(stats["tasks_completed"] for stats in user_stats.values())
+    total_games = sum(stats["games_played"] for stats in user_stats.values())
     
-    await query.edit_message_text(
+    await query.message.edit_text(
         f"📊 **Статистика бота**\n\n"
         f"👥 Всего пользователей: {total_users}\n"
-        f"💰 Всего в обращении: {total_currency} {CURRENCY_NAME}\n"
+        f"💰 Всего MCoin: {total_mcoins}\n"
         f"✅ Выполнено заданий: {total_tasks}\n"
-        f"🎲 Активная лотерея: {'Да' if active_lottery['active'] else 'Нет'}",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")
-        ]])
+        f"🎮 Сыграно игр: {total_games}\n"
+        f"🎫 Билетов в лотерее: {active_lottery['total_tickets']}\n"
+        f"🏆 Призовой фонд: {active_lottery['prize_pool']} MCoin",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В админ-панель", callback_data="admin_panel")]])
     )
-
-# ==================================================
-# ========== ОБРАБОТЧИКИ НАВИГАЦИИ =================
-# ==================================================
-
-async def back_to_main(update: Update, context: CallbackContext):
-    """Возврат в главное меню"""
-    query = update.callback_query
     await query.answer()
-    user_id = update.effective_user.id
-    await query.edit_message_text(
-        f"👋 Главное меню\n\n💰 Баланс: {user_balances[user_id]} {CURRENCY_NAME}",
-        reply_markup=get_main_keyboard(user_id)
+
+async def admin_end_lottery(update: Update, context: CallbackContext):
+    query = update.callback_query
+    
+    if active_lottery["total_tickets"] == 0:
+        await query.answer("Нет билетов в лотерее!", show_alert=True)
+        return
+    
+    winner_id = random.choices(
+        list(active_lottery["tickets"].keys()),
+        weights=list(active_lottery["tickets"].values())
+    )[0]
+    
+    prize = int(active_lottery["prize_pool"] * 0.7)
+    await add_mcoins(winner_id, prize, "победа в лотерее")
+    
+    await query.message.edit_text(
+        f"🎲 **Лотерея завершена!**\n\n"
+        f"🏆 Победитель: @{winner_id}\n"
+        f"💰 Выигрыш: {prize} MCoin\n\n"
+        f"Остальные билеты сгорают.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В админ-панель", callback_data="admin_panel")]])
     )
-
-# ==================================================
-# ========== ОБРАБОТЧИК КОМАНДЫ GIVE ===============
-# ==================================================
-
-async def give_command(update: Update, context: CallbackContext):
-    """Команда для выдачи валюты"""
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ У вас нет прав для этой команды!")
-        return
     
-    if len(context.args) != 2:
-        await update.message.reply_text("Использование: /give <user_id> <amount>")
-        return
+    # Сброс лотереи
+    active_lottery["end_time"] = None
+    active_lottery["tickets"] = {}
+    active_lottery["total_tickets"] = 0
+    active_lottery["prize_pool"] = 1000
+    user_lottery_tickets.clear()
     
-    try:
-        user_id = int(context.args[0])
-        amount = int(context.args[1])
-        
-        user_balances[user_id] += amount
-        user_stats[user_id]["total_earned"] += amount
-        
-        await update.message.reply_text(
-            f"✅ Выдано {amount} {CURRENCY_NAME} пользователю {user_id}\n"
-            f"💰 Новый баланс: {user_balances[user_id]} {CURRENCY_NAME}"
-        )
-        
-        await context.bot.send_message(
-            user_id,
-            f"🎉 Вам начислено {amount} {CURRENCY_NAME} от администрации!\n"
-            f"💰 Баланс: {user_balances[user_id]} {CURRENCY_NAME}"
-        )
-    except:
-        await update.message.reply_text("❌ Неверный формат! Используйте /give <user_id> <amount>")
-
-async def check_subscriptions_command(update: Update, context: CallbackContext):
-    """Проверка обязательных подписок"""
-    user_id = update.effective_user.id
-    
-    if not REQUIRED_SUBSCRIPTIONS:
-        await update.message.reply_text("✅ Нет обязательных подписок!")
-        return
-    
-    subscribed = await check_subscriptions(user_id, context)
-    
-    if subscribed:
-        await update.message.reply_text(
-            "✅ Все подписки активны!\n"
-            "Вы можете пользоваться ботом в полном объеме."
-        )
-    else:
-        keyboard = []
-        for channel in REQUIRED_SUBSCRIPTIONS:
-            keyboard.append([InlineKeyboardButton(
-                f"📢 Подписаться на {channel['name']}", 
-                url=f"https://t.me/{channel['id'].replace('@', '')}"
-            )])
-        keyboard.append([InlineKeyboardButton("🔄 Проверить", callback_data="check_subs")])
-        
-        await update.message.reply_text(
-            "⚠️ **Для использования бота необходимо подписаться на каналы:**\n\n"
-            "Подпишитесь на все каналы ниже и нажмите «Проверить»",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-async def force_check_subs(update: Update, context: CallbackContext):
-    """Принудительная проверка подписок"""
-    query = update.callback_query
     await query.answer()
+
+# ========== ОБРАБОТЧИК КНОПОК ==========
+async def button_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    data = query.data
+    
+    if data == "main_menu":
+        await start(update, context)
+    elif data == "profile":
+        await profile_callback(update, context)
+    elif data == "tasks_menu":
+        await tasks_menu_callback(update, context)
+    elif data == "regular_tasks":
+        await regular_tasks(update, context)
+    elif data == "advanced_tasks":
+        await advanced_tasks(update, context)
+    elif data == "check_advanced_task":
+        await check_advanced_task(update, context)
+    elif data == "skip_advanced_task":
+        await skip_advanced_task(update, context)
+    elif data == "games_menu":
+        await games_menu_callback(update, context)
+    elif data == "cases_menu":
+        await cases_menu_callback(update, context)
+    elif data.startswith("open_case_"):
+        case_id = data.replace("open_case_", "")
+        await open_case(update, context, case_id)
+    elif data == "lottery":
+        await lottery_callback(update, context)
+    elif data == "buy_ticket":
+        await buy_ticket(update, context)
+    elif data == "referral":
+        await referral_callback(update, context)
+    elif data == "mining":
+        await mining_callback(update, context)
+    elif data == "start_mining":
+        await start_mining(update, context)
+    elif data == "daily_bonus":
+        await daily_bonus_callback(update, context)
+    elif data == "admin_panel":
+        await admin_panel_callback(update, context)
+    elif data == "admin_stats":
+        await admin_stats(update, context)
+    elif data == "admin_end_lottery":
+        await admin_end_lottery(update, context)
+    elif data.startswith("complete_task_"):
+        await complete_task_callback(update, context)
+    elif data.startswith("game_"):
+        game_id = data.replace("game_", "")
+        await query.message.reply_text(f"Введите ставку для игры {GAMES[game_id]['name']} (от {GAMES[game_id]['min_bet']} до {GAMES[game_id]['max_bet']}):")
+        context.user_data["pending_game"] = game_id
+        await query.answer()
+
+# ========== ОБРАБОТЧИК СООБЩЕНИЙ ==========
+async def handle_message(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     
-    subscribed = await check_subscriptions(user_id, context)
-    
-    if subscribed:
-        await query.edit_message_text(
-            "✅ Спасибо за подписку! Теперь вы можете пользоваться ботом.",
-            reply_markup=get_main_keyboard(user_id)
-        )
-    else:
-        await query.edit_message_text(
-            "❌ Вы всё ещё не подписаны на все каналы.\n"
-            "Пожалуйста, подпишитесь и попробуйте снова."
-        )
+    if "pending_game" in context.user_data:
+        try:
+            bet = int(update.message.text)
+            game_id = context.user_data["pending_game"]
+            
+            if game_id == "coinflip":
+                result = await game_coinflip(update, context, bet)
+            elif game_id == "dice":
+                result = await game_dice(update, context, bet)
+            elif game_id == "slots":
+                result = await game_slots(update, context, bet)
+            else:
+                result = "❌ Игра не найдена!"
+            
+            await update.message.reply_text(result)
+            del context.user_data["pending_game"]
+        except ValueError:
+            await update.message.reply_text("❌ Введите число!")
 
-# ==================================================
-# ========== ЗАПУСК БОТА ===========================
-# ==================================================
-
+# ========== ЗАПУСК БОТА ==========
 def main():
+    load_data()
+    
     app = Application.builder().token(BOT_TOKEN).build()
     
     # Команды
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("give", give_command))
-    app.add_handler(CommandHandler("checksubs", check_subscriptions_command))
+    app.add_handler(CommandHandler("tasks", tasks_menu_callback))
+    app.add_handler(CommandHandler("profile", profile_callback))
+    app.add_handler(CommandHandler("balance", profile_callback))
     
-    # Callback обработчики
-    app.add_handler(CallbackQueryHandler(balance, pattern="^balance$"))
-    app.add_handler(CallbackQueryHandler(stats, pattern="^stats$"))
-    app.add_handler(CallbackQueryHandler(daily_reward, pattern="^daily$"))
-    app.add_handler(CallbackQueryHandler(tasks_menu, pattern="^tasks_menu$"))
-    app.add_handler(CallbackQueryHandler(regular_tasks, pattern="^regular_tasks$"))
-    app.add_handler(CallbackQueryHandler(advanced_tasks, pattern="^advanced_tasks$"))
-    app.add_handler(CallbackQueryHandler(check_advanced_task, pattern="^check_advanced_task$"))
-    app.add_handler(CallbackQueryHandler(skip_advanced_task, pattern="^skip_advanced_task$"))
-    app.add_handler(CallbackQueryHandler(games_menu, pattern="^games_menu$"))
-    app.add_handler(CallbackQueryHandler(game_slots, pattern="^game_slots$"))
-    app.add_handler(CallbackQueryHandler(game_dice, pattern="^game_dice$"))
-    app.add_handler(CallbackQueryHandler(lottery_menu, pattern="^lottery_menu$"))
-    app.add_handler(CallbackQueryHandler(buy_ticket, pattern="^buy_ticket$"))
-    app.add_handler(CallbackQueryHandler(lottery_info, pattern="^lottery_info$"))
-    app.add_handler(CallbackQueryHandler(cases_menu, pattern="^cases_menu$"))
-    app.add_handler(CallbackQueryHandler(referral_menu, pattern="^referral_menu$"))
-    app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
-    app.add_handler(CallbackQueryHandler(admin_give, pattern="^admin_give$"))
-    app.add_handler(CallbackQueryHandler(admin_create_lottery, pattern="^admin_create_lottery$"))
-    app.add_handler(CallbackQueryHandler(admin_stats, pattern="^admin_stats$"))
-    app.add_handler(CallbackQueryHandler(back_to_main, pattern="^back_to_main$"))
-    app.add_handler(CallbackQueryHandler(force_check_subs, pattern="^check_subs$"))
+    # Обработчики
+    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Обработчики для кейсов
-    for case_type in CASE_PRICES.keys():
-        app.add_handler(CallbackQueryHandler(
-            lambda update, context, ct=case_type: open_case(update, context, ct),
-            pattern=f"^open_case_{case_type}$"
-        ))
-    
-    print("🚀 Бот запущен с игровой системой!")
-    print(f"👑 Администратор: {ADMIN_ID}")
-    print(f"💰 Валюта: {CURRENCY_NAME}")
-    
-    # Запуск проверки лотереи
-    async def check_lottery():
-        while True:
-            if active_lottery["active"] and active_lottery["end_time"] and datetime.now() >= active_lottery["end_time"]:
-                if len(active_lottery["participants"]) >= LOTTERY_MIN_PARTICIPANTS:
-                    winner = random.choice(active_lottery["participants"])
-                    prize = active_lottery["prize_pool"]
-                    user_balances[winner] += prize
-                    user_stats[winner]["total_earned"] += prize
-                    
-                    for user_id in active_lottery["participants"]:
-                        await app.bot.send_message(
-                            user_id,
-                            f"🎲 **Лотерея завершена!**\n\n"
-                            f"🏆 Победитель: пользователь {winner}\n"
-                            f"💰 Выигрыш: {prize} {CURRENCY_NAME}\n\n"
-                            f"Спасибо за участие!"
-                        )
-                
-                active_lottery["active"] = False
-                active_lottery["participants"] = []
-                active_lottery["prize_pool"] = 0
-            
-            await asyncio.sleep(60)
-    
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.create_task(check_lottery())
-    
+    print("🚀 Бот запущен...")
+    print(f"👑 Админ ID: {ADMIN_ID}")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
