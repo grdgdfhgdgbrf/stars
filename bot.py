@@ -22,7 +22,7 @@ import aiohttp
 BOT_TOKEN = "8251949164:AAEUSmnhX_S4p-vWDD4fvC6mDclV0LvIFe0"
 BOTOHUB_TOKEN = "3feed57e-9303-4343-8d87-ed8d9dd5650f"
 BOTOHUB_API_URL = "https://botohub.me/get-tasks"
-ADMIN_ID = 5356403777  # ID администратора
+ADMIN_ID = 535640377  # ID администратора
 
 # Файлы для хранения данных
 DATA_FILE = "bot_data.json"
