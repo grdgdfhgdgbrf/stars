@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = "8251949164:AAEUSmnhX_S4p-vWDD4fvC6mDclV0LvIFe0"
 BOTOHUB_TOKEN = "3feed57e-9303-4343-8d87-ed8d9dd5650f"
 BOTOHUB_API_URL = "https://botohub.me/get-tasks"
-ADMIN_ID = 5356403777
+ADMIN_ID = 5356400377
 
 # Состояния для ConversationHandler
 (SET_REWARD, SET_PRICE, SET_NAME, SET_DESCRIPTION, SET_WIN_CHANCE, 
