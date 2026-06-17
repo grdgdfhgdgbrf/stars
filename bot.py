@@ -40,13 +40,12 @@ ADMIN_ID = 5356400377
 (SET_REWARD, SET_PRICE, SET_NAME, SET_DESCRIPTION, SET_WIN_CHANCE, 
  SET_ADMIN_ID, SET_CHANNEL, SET_PROMO, SET_WITHDRAW, SET_CHEQUE_AMOUNT,
  MAILING_TEXT, SET_TAX, SET_LIMIT, SET_REF_BONUS, EDIT_ITEM,
- AWAITING_WITHDRAW_AMOUNT, AWAITING_WITHDRAW_METHOD, AWAITING_CHEQUE_CODE) = range(18)
+ AWAITING_WITHDRAW_AMOUNT, AWAITING_WITHDRAW_METHOD, AWAITING_CHEQUE_CODE,
+ AWAITING_PROMO_CODE, AWAITING_BAN_REASON, AWAITING_MAILING_CONFIRM) = range(21)
 
 # Файлы для хранения данных
 DATA_FILE = "bot_data.json"
 SETTINGS_FILE = "settings.json"
-PROMO_FILE = "promo_codes.json"
-CHEQUES_FILE = "cheques.json"
 
 # ========== СТРУКТУРА ДАННЫХ ==========
 class BotDatabase:
@@ -1208,7 +1207,6 @@ async def skip_task_callback(update: Update, context: CallbackContext):
 async def promo_menu(update: Update, context: CallbackContext):
     """Меню промокодов"""
     user_id = update.effective_user.id
-    user = get_user_data(user_id)
     
     keyboard = [
         [InlineKeyboardButton("🎫 Активировать промокод", callback_data="activate_promo")],
@@ -1245,7 +1243,7 @@ async def activate_promo_callback(update: Update, context: CallbackContext):
     
     await query.message.edit_text(
         "🎫 **Введите промокод:**\n\n"
-        "Введите код в сообщении или /cancel для отмены",
+        "Введите код в сообщении или нажмите Отмена",
         reply_markup=reply_markup
     )
 
@@ -1338,7 +1336,7 @@ async def stats_menu(update: Update, context: CallbackContext):
     level, exp_needed, current_exp = get_level_info(user_id)
     
     # Прогресс-бар
-    progress = int((current_exp / exp_needed) * 20)
+    progress = int((current_exp / exp_needed) * 20) if exp_needed > 0 else 0
     progress_bar = "█" * progress + "░" * (20 - progress)
     
     keyboard = [
@@ -1371,6 +1369,11 @@ async def detailed_stats_callback(update: Update, context: CallbackContext):
     user_id = query.from_user.id
     user = get_user_data(user_id)
     
+    completed_withdrawals = 0
+    for uid, req in db.withdraw_requests.items():
+        if uid == user_id and req.get("status") == "completed":
+            completed_withdrawals += 1
+    
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="stats_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -1383,7 +1386,7 @@ async def detailed_stats_callback(update: Update, context: CallbackContext):
         f"📊 **Активность:**\n"
         f"• Заданий выполнено: {len(user['tasks_completed'])}\n"
         f"• Рефералов приглашено: {len(user['referrals'])}\n"
-        f"• Выводов: {len([r for r in db.withdraw_requests.values() if r.get('status') == 'completed' and r.get('user_id') == user_id])}\n\n"
+        f"• Выводов завершено: {completed_withdrawals}\n\n"
         f"📅 **Даты:**\n"
         f"• В боте с: {user['join_date'][:10]}\n"
         f"• Последний визит: {user['last_seen'][:10] if user.get('last_seen') else 'Неизвестно'}\n"
@@ -1614,6 +1617,25 @@ async def remove_force_sub(update: Update, context: CallbackContext):
         reply_markup=reply_markup
     )
 
+async def remove_force_sub_item(update: Update, context: CallbackContext):
+    """Удаление конкретного элемента подписки"""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data.replace("remove_channel_", "").replace("remove_group_", "")
+    
+    if "channel" in query.data:
+        if data in settings.force_sub_channels:
+            settings.force_sub_channels.remove(data)
+    else:
+        if data in settings.force_sub_groups:
+            settings.force_sub_groups.remove(data)
+    
+    settings.save()
+    
+    await query.message.edit_text(f"✅ {data} удален из обязательных подписок!")
+    await admin_forcesub_menu(update, context)
+
 # ========== АДМИН: УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ ==========
 async def admin_users_menu(update: Update, context: CallbackContext):
     """Меню управления пользователями"""
@@ -1635,6 +1657,59 @@ async def admin_users_menu(update: Update, context: CallbackContext):
         f"Всего пользователей: {db.global_stats['total_users']}\n"
         f"Забанено: {len(db.bans)}\n\n"
         f"Выберите действие:",
+        reply_markup=reply_markup
+    )
+
+async def ban_user_callback(update: Update, context: CallbackContext):
+    """Бан пользователя"""
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data["ban_step"] = "user_id"
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_ban")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.edit_text(
+        "⛔ **Бан пользователя**\n\n"
+        "Введите ID пользователя для бана:",
+        reply_markup=reply_markup
+    )
+
+async def unban_user_callback(update: Update, context: CallbackContext):
+    """Разбан пользователя"""
+    query = update.callback_query
+    await query.answer()
+    
+    if not db.bans:
+        await query.message.edit_text("📭 Нет забаненных пользователей!")
+        return
+    
+    keyboard = []
+    for uid in db.bans.keys():
+        user = db.users.get(uid, {})
+        name = user.get("first_name", f"User_{uid}")
+        keyboard.append([InlineKeyboardButton(f"✅ {name} ({uid})", callback_data=f"unban_{uid}")])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_users")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.edit_text(
+        "✅ **Разбан пользователя**\n\n"
+        "Выберите пользователя для разбана:",
+        reply_markup=reply_markup
+    )
+
+async def add_mcoin_callback(update: Update, context: CallbackContext):
+    """Добавление MCoin пользователю"""
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data["add_mcoin_step"] = "user_id"
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_add_mcoin")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.edit_text(
+        "💰 **Добавление MCoin**\n\n"
+        "Введите ID пользователя:",
         reply_markup=reply_markup
     )
 
@@ -1733,7 +1808,7 @@ async def admin_mailing(update: Update, context: CallbackContext):
         "📨 **Создание рассылки**\n\n"
         "Введите текст сообщения для рассылки:\n"
         "Поддерживается Markdown\n\n"
-        "/cancel для отмены",
+        "Нажмите Отмена для отмены",
         reply_markup=reply_markup
     )
 
@@ -1785,7 +1860,7 @@ async def send_mailing_callback(update: Update, context: CallbackContext):
         try:
             await context.bot.send_message(uid, message_text, parse_mode="Markdown")
             sent += 1
-            await asyncio.sleep(0.05)  # Ограничение чтобы не заблокировали
+            await asyncio.sleep(0.05)
         except:
             failed += 1
     
@@ -1820,13 +1895,12 @@ async def admin_promo_menu(update: Update, context: CallbackContext):
         reply_markup=reply_markup
     )
 
-async def create_promo_code(update: Update, context: CallbackContext):
+async def create_promo_code_callback(update: Update, context: CallbackContext):
     """Создание промокода"""
     query = update.callback_query
     await query.answer()
     
     context.user_data["promo_create_step"] = "code"
-    
     keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_promo_create")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -1862,13 +1936,12 @@ async def admin_cheques_menu(update: Update, context: CallbackContext):
         reply_markup=reply_markup
     )
 
-async def create_cheque_menu(update: Update, context: CallbackContext):
+async def create_cheque_menu_callback(update: Update, context: CallbackContext):
     """Создание чека через админку"""
     query = update.callback_query
     await query.answer()
     
     context.user_data["cheque_step"] = "amount"
-    
     keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_cheque")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -1903,7 +1976,6 @@ async def start(update: Update, context: CallbackContext):
                 referrer_data["referrals"].append(user_id)
                 referrer_data["referral_count"] += 1
                 
-                # Начисляем бонус
                 ref_reward = int(settings.referral_reward * get_referral_bonus(len(referrer_data["referrals"])))
                 add_mcoins(referrer_id, ref_reward, "referral_bonus", "referral")
                 db.save()
@@ -2005,6 +2077,10 @@ async def handle_text(update: Update, context: CallbackContext):
         await mailing_message_input(update, context)
         return
     
+    if context.user_data.get("setting_to_change"):
+        await reward_value_input(update, context)
+        return
+    
     # Обработка команд с кнопок
     if text == f"💰 {settings.currency_name}":
         await balance_handler(update, context)
@@ -2044,27 +2120,34 @@ def main():
     # Регистрируем обработчики команд
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("tasks", tasks_mode))
-    app.add_handler(CommandHandler("promo", use_promo))
-    app.add_handler(CommandHandler("cheque", activate_cheque))
-    app.add_handler(CommandHandler("create_cheque", create_cheque))
-    app.add_handler(CommandHandler("list_cheques", list_cheques))
     
     # Регистрируем callback обработчики
     app.add_handler(CallbackQueryHandler(check_task_callback, pattern="^check_task_"))
     app.add_handler(CallbackQueryHandler(skip_task_callback, pattern="^skip_task$"))
     app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
     app.add_handler(CallbackQueryHandler(admin_rewards_menu, pattern="^admin_rewards$"))
+    app.add_handler(CallbackQueryHandler(set_reward_value, pattern="^set_"))
     app.add_handler(CallbackQueryHandler(admin_forcesub_menu, pattern="^admin_forcesub$"))
+    app.add_handler(CallbackQueryHandler(add_force_sub, pattern="^add_(channel|group)$"))
+    app.add_handler(CallbackQueryHandler(remove_force_sub, pattern="^remove_(channel|group)$"))
+    app.add_handler(CallbackQueryHandler(remove_force_sub_item, pattern="^remove_(channel|group)_"))
     app.add_handler(CallbackQueryHandler(admin_users_menu, pattern="^admin_users$"))
+    app.add_handler(CallbackQueryHandler(ban_user_callback, pattern="^ban_user$"))
+    app.add_handler(CallbackQueryHandler(unban_user_callback, pattern="^unban_user$"))
+    app.add_handler(CallbackQueryHandler(add_mcoin_callback, pattern="^add_mcoin_user$"))
     app.add_handler(CallbackQueryHandler(admin_stats, pattern="^admin_stats$"))
     app.add_handler(CallbackQueryHandler(admin_withdrawals, pattern="^admin_withdrawals$"))
     app.add_handler(CallbackQueryHandler(admin_mailing, pattern="^admin_mailing$"))
+    app.add_handler(CallbackQueryHandler(send_mailing_callback, pattern="^send_mailing$"))
     app.add_handler(CallbackQueryHandler(admin_promo_menu, pattern="^admin_promo$"))
+    app.add_handler(CallbackQueryHandler(create_promo_code_callback, pattern="^create_promo_code$"))
     app.add_handler(CallbackQueryHandler(admin_cheques_menu, pattern="^admin_cheques$"))
+    app.add_handler(CallbackQueryHandler(create_cheque_menu_callback, pattern="^create_cheque_menu$"))
     
     app.add_handler(CallbackQueryHandler(referrals_menu, pattern="^referrals_menu$"))
     app.add_handler(CallbackQueryHandler(my_referrals_callback, pattern="^my_referrals$"))
     app.add_handler(CallbackQueryHandler(ref_stats_callback, pattern="^ref_stats$"))
+    app.add_handler(CallbackQueryHandler(lambda u,c: my_referrals_callback(u,c), pattern="^ref_page_"))
     
     app.add_handler(CallbackQueryHandler(withdraw_menu, pattern="^withdraw_menu$"))
     app.add_handler(CallbackQueryHandler(request_withdraw_callback, pattern="^request_withdraw$"))
