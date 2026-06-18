@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 # ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = "8251949164:AAHe6RTvf3OXniMVZd7_ICCH1BPtRNxHKFo"
-BOTOHUB_TOKEN = "3feed57e-9303-4343-8d87-ed8d9dd5650f"
+BOTOHUB_TOKEN = "c72ddc9b-c2dc-4e3e-a985-7d51f0d77f58"
 BOTOHUB_API_URL = "https://botohub.me/get-tasks"
 ADMIN_ID = 5356400377
 
