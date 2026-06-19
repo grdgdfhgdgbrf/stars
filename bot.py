@@ -172,7 +172,6 @@ def get_user_data(user_id: int) -> Dict:
     return db.users[user_id]
 
 def get_user_by_username(username: str) -> Optional[int]:
-    """Находит пользователя по юзернейму (без @)"""
     username = username.lower().strip()
     if username.startswith("@"):
         username = username[1:]
@@ -217,9 +216,6 @@ def remove_mcoins(user_id: int, amount: int, reason: str = "") -> bool:
 
 def format_number(num: int) -> str:
     return f"{num:,}".replace(",", ".")
-
-def get_referral_bonus(referral_count: int) -> float:
-    return 1.0
 
 # ========== ПРОВЕРКА ПОДПИСОК ==========
 async def check_force_subs(user_id: int, bot) -> Tuple[bool, List[str]]:
@@ -674,6 +670,20 @@ async def ref_stats_callback(update: Update, context: CallbackContext):
         f"🏆 Ваш доход: {user['referral_earned']} {settings.currency_name}\n\n"
         f"📈 Средний доход на реферала: {format_number(total_earned // len(user['referrals']) if user['referrals'] else 0)} {settings.currency_name}"
     )
+
+async def ref_page_navigation(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    direction = query.data.replace("ref_page_", "")
+    current_page = context.user_data.get("ref_page", 0)
+    
+    if direction == "prev":
+        context.user_data["ref_page"] = max(0, current_page - 1)
+    elif direction == "next":
+        context.user_data["ref_page"] = current_page + 1
+    
+    await my_referrals_callback(update, context)
 
 # ========== ЕЖЕДНЕВНЫЙ БОНУС ==========
 async def daily_bonus(update: Update, context: CallbackContext):
@@ -1170,6 +1180,11 @@ async def reward_value_input(update: Update, context: CallbackContext):
             settings.min_withdraw = value
         elif setting == "max_tasks":
             settings.max_daily_tasks = value
+        elif setting == "withdraw_commission":
+            if value > 100:
+                await update.message.reply_text("❌ Комиссия не может быть больше 100%!")
+                return
+            settings.withdraw_commission = value / 100
         
         settings.save()
         context.user_data.pop("setting_to_change", None)
@@ -1800,7 +1815,6 @@ async def start(update: Update, context: CallbackContext):
         )
         return
     
-    # Сохраняем username пользователя
     user_data = get_user_data(user_id)
     if update.effective_user.username:
         user_data["username"] = update.effective_user.username
@@ -1814,7 +1828,6 @@ async def start(update: Update, context: CallbackContext):
                 user_data["referrer"] = referrer_id
                 referrer_data = get_user_data(referrer_id)
                 referrer_data["referrals"].append(user_id)
-                referrer_data["referral_count"] = 0
                 
                 ref_reward = settings.referral_reward
                 add_mcoins(referrer_id, ref_reward, "referral_bonus", "referral")
@@ -1878,6 +1891,10 @@ async def balance_handler(update: Update, context: CallbackContext):
         f"🔥 Серия: {user['daily_streak']} дней",
         parse_mode="Markdown"
     )
+
+async def cancel_command(update: Update, context: CallbackContext):
+    context.user_data.clear()
+    await update.message.reply_text("✅ Все операции отменены.")
 
 async def handle_text(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
@@ -1968,6 +1985,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("tasks", tasks_mode))
     app.add_handler(CommandHandler("balance", balance_handler))
+    app.add_handler(CommandHandler("cancel", cancel_command))
     
     # Callback обработчики - ЗАДАНИЯ
     app.add_handler(CallbackQueryHandler(check_task_callback, pattern="^check_task_"))
@@ -1999,7 +2017,7 @@ def main():
     app.add_handler(CallbackQueryHandler(referrals_menu, pattern="^referrals_menu$"))
     app.add_handler(CallbackQueryHandler(my_referrals_callback, pattern="^my_referrals$"))
     app.add_handler(CallbackQueryHandler(ref_stats_callback, pattern="^ref_stats$"))
-    app.add_handler(CallbackQueryHandler(lambda u,c: u.callback_query.message.delete(), pattern="^ref_page_"))
+    app.add_handler(CallbackQueryHandler(ref_page_navigation, pattern="^ref_page_"))
     
     # Callback обработчики - ВЫВОД
     app.add_handler(CallbackQueryHandler(withdraw_menu, pattern="^withdraw_menu$"))
