@@ -35,9 +35,9 @@ BOTOHUB_API_URL = "https://botohub.me/get-tasks"
 ADMIN_ID = 5356400377
 
 # Состояния для ConversationHandler
-(AWAITING_WITHDRAW_AMOUNT, AWAITING_WITHDRAW_CONFIRM, AWAITING_BAN_USER,
- AWAITING_UNBAN_USER, AWAITING_ADD_MCOIN, MAILING_TEXT, 
- AWAITING_SETTING_VALUE, AWAITING_FORCE_SUB_INPUT, AWAITING_WITHDRAW_QIWI) = range(9)
+(AWAITING_WITHDRAW_AMOUNT, AWAITING_WITHDRAW_CONFIRM, AWAITING_BAN_USERNAME,
+ AWAITING_UNBAN_USERNAME, AWAITING_ADD_MCOIN_USERNAME, MAILING_TEXT, 
+ AWAITING_SETTING_VALUE, AWAITING_FORCE_SUB_INPUT) = range(8)
 
 # Файлы для хранения данных
 DATA_FILE = "bot_data.json"
@@ -58,7 +58,6 @@ class BotDatabase:
             "total_referrals": 0,
         }
         self.pending_checks: Dict[int, Dict] = {}
-        self.qiwi_wallets: Dict[int, str] = {}
         
     def save(self):
         data = {
@@ -67,8 +66,7 @@ class BotDatabase:
             "task_history": self.task_history,
             "bans": self.bans,
             "global_stats": self.global_stats,
-            "pending_checks": self.pending_checks,
-            "qiwi_wallets": self.qiwi_wallets
+            "pending_checks": self.pending_checks
         }
         try:
             with open(DATA_FILE, 'w', encoding='utf-8') as f:
@@ -88,7 +86,6 @@ class BotDatabase:
                     self.bans = {int(k): v for k, v in data.get("bans", {}).items()}
                     self.global_stats = data.get("global_stats", self.global_stats)
                     self.pending_checks = {int(k): v for k, v in data.get("pending_checks", {}).items()}
-                    self.qiwi_wallets = {int(k): v for k, v in data.get("qiwi_wallets", {}).items()}
                 logger.info("Данные загружены")
             except Exception as e:
                 logger.error(f"Ошибка загрузки данных: {e}")
@@ -104,8 +101,6 @@ class BotSettings:
         self.force_sub_groups = []
         self.welcome_message = "Добро пожаловать в бот! 🎉"
         self.referral_program = True
-        self.ref_levels = [5, 10, 15, 20, 25]
-        self.ref_multipliers = [1.0, 1.1, 1.2, 1.3, 1.5]
         self.admin_list = [ADMIN_ID]
         self.bot_name = "MCoin Bot"
         self.bot_description = "Зарабатывай MCoin выполняя задания!"
@@ -113,7 +108,6 @@ class BotSettings:
         self.withdraw_commission = 0.05
         self.max_daily_tasks = 20
         self.maintenance_mode = False
-        self.qiwi_required = True
         
     def save(self):
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
@@ -166,19 +160,27 @@ def get_user_data(user_id: int) -> Dict:
             "last_seen": datetime.now().isoformat(),
             "username": None,
             "first_name": "",
-            "level": 1,
-            "experience": 0,
             "daily_streak": 0,
             "last_streak_date": None,
             "referral_earned": 0,
             "task_earned": 0,
             "bonus_claims": 0,
-            "last_withdraw_date": None,
-            "qiwi_wallet": None
+            "last_withdraw_date": None
         }
         db.global_stats["total_users"] += 1
         db.save()
     return db.users[user_id]
+
+def get_user_by_username(username: str) -> Optional[int]:
+    """Находит пользователя по юзернейму (без @)"""
+    username = username.lower().strip()
+    if username.startswith("@"):
+        username = username[1:]
+    
+    for user_id, data in db.users.items():
+        if data.get("username") and data["username"].lower() == username:
+            return user_id
+    return None
 
 def add_mcoins(user_id: int, amount: int, reason: str = "", source: str = "other") -> bool:
     if amount <= 0:
@@ -196,7 +198,6 @@ def add_mcoins(user_id: int, amount: int, reason: str = "", source: str = "other
         db.global_stats["total_referrals"] += 1
     
     db.global_stats["total_mcoins_earned"] += amount
-    update_user_level(user_id)
     db.save()
     
     logger.info(f"Пользователю {user_id} начислено {amount} MCoin. Причина: {reason}")
@@ -214,47 +215,10 @@ def remove_mcoins(user_id: int, amount: int, reason: str = "") -> bool:
         return True
     return False
 
-def update_user_level(user_id: int) -> bool:
-    user = get_user_data(user_id)
-    total_earned = user["total_earned"]
-    
-    if total_earned >= 100:
-        new_level = 1
-        exp_needed = 100
-        exp = total_earned
-        
-        while exp >= exp_needed and new_level < 100:
-            exp -= exp_needed
-            new_level += 1
-            exp_needed = int(exp_needed * 1.5)
-        
-        if new_level > user["level"]:
-            user["level"] = new_level
-            return True
-    return False
-
-def get_level_info(user_id: int) -> Tuple[int, int, int]:
-    user = get_user_data(user_id)
-    total_earned = user["total_earned"]
-    
-    level = 1
-    exp_needed = 100
-    exp = total_earned
-    
-    while exp >= exp_needed and level < 100:
-        exp -= exp_needed
-        level += 1
-        exp_needed = int(exp_needed * 1.5)
-    
-    return level, exp_needed, exp
-
 def format_number(num: int) -> str:
     return f"{num:,}".replace(",", ".")
 
 def get_referral_bonus(referral_count: int) -> float:
-    for i, level in enumerate(settings.ref_levels):
-        if referral_count >= level and i < len(settings.ref_multipliers):
-            return settings.ref_multipliers[i]
     return 1.0
 
 # ========== ПРОВЕРКА ПОДПИСОК ==========
@@ -338,23 +302,19 @@ async def withdraw_menu(update: Update, context: CallbackContext):
         )
         return
     
-    # Проверяем наличие Qiwi кошелька
-    qiwi_wallet = db.qiwi_wallets.get(user_id)
-    if not qiwi_wallet:
+    username = update.effective_user.username
+    if not username:
         await update.message.reply_text(
-            "⚠️ **Для вывода средств необходимо указать Qiwi кошелек!**\n\n"
-            "Отправьте ваш номер Qiwi кошелька в формате:\n"
-            "`+7XXXXXXXXXX` или `7XXXXXXXXXX`\n\n"
-            "Пример: +79123456789"
+            "⚠️ **У вас нет username!**\n\n"
+            "Для вывода средств необходимо установить username в Telegram.\n\n"
+            "Настройте username в настройках профиля Telegram и попробуйте снова."
         )
-        context.user_data["awaiting_qiwi"] = True
         return
     
     keyboard = [
         [InlineKeyboardButton("💰 Запросить вывод", callback_data="request_withdraw")],
         [InlineKeyboardButton("📊 История выводов", callback_data="withdraw_history")],
         [InlineKeyboardButton("ℹ️ Информация", callback_data="withdraw_info")],
-        [InlineKeyboardButton("🔄 Сменить Qiwi кошелек", callback_data="change_qiwi")],
         [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -362,69 +322,18 @@ async def withdraw_menu(update: Update, context: CallbackContext):
     pending = db.withdraw_requests.get(user_id, {}).get("status") == "pending"
     pending_text = "\n⚠️ У вас есть активная заявка на вывод!" if pending else ""
     
-    qiwi_display = f"💳 Ваш Qiwi: `{qiwi_wallet}`" if qiwi_wallet else "💳 Qiwi не указан"
-    
     await update.message.reply_text(
         f"💸 **Вывод средств** 💸\n\n"
-        f"{qiwi_display}\n"
+        f"👤 Ваш username: @{username}\n"
         f"💰 Доступно: {format_number(user['mcoin'])} {settings.currency_name}\n"
         f"📉 Минимальная сумма: {settings.min_withdraw} {settings.currency_name}\n"
         f"📈 Максимальная сумма: {settings.max_withdraw} {settings.currency_name}\n"
         f"💳 Комиссия: {settings.withdraw_commission * 100}%\n"
-        f"💳 Вывод только на Qiwi кошелек\n\n"
+        f"💳 Вывод на ваш Telegram username\n\n"
         f"⏱️ Время обработки: до 24 часов\n"
         f"{pending_text}\n\n"
         f"Нажмите «Запросить вывод» для создания заявки",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
-
-async def set_qiwi_wallet(update: Update, context: CallbackContext):
-    """Установка Qiwi кошелька пользователя"""
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
-    
-    # Удаляем пробелы и проверяем формат
-    phone = re.sub(r'\s+', '', text)
-    phone = re.sub(r'^\+', '', phone)
-    
-    # Проверяем что это номер телефона
-    if not re.match(r'^7\d{10}$', phone):
-        await update.message.reply_text(
-            "❌ **Неверный формат!**\n\n"
-            "Введите номер в формате:\n"
-            "`+7XXXXXXXXXX` или `7XXXXXXXXXX`\n\n"
-            "Пример: +79123456789"
-        )
-        return
-    
-    # Сохраняем кошелек
-    db.qiwi_wallets[user_id] = f"+{phone}"
-    user = get_user_data(user_id)
-    user["qiwi_wallet"] = f"+{phone}"
-    db.save()
-    
-    context.user_data.pop("awaiting_qiwi", None)
-    
-    await update.message.reply_text(
-        f"✅ **Qiwi кошелек сохранен!**\n\n"
-        f"💳 Ваш кошелек: `+{phone}`\n"
-        f"Теперь вы можете запросить вывод средств.",
-        parse_mode="Markdown"
-    )
-
-async def change_qiwi_callback(update: Update, context: CallbackContext):
-    """Смена Qiwi кошелька"""
-    query = update.callback_query
-    await query.answer()
-    
-    context.user_data["awaiting_qiwi"] = True
-    
-    await query.message.edit_text(
-        "🔄 **Смена Qiwi кошелька**\n\n"
-        "Отправьте новый номер Qiwi кошелька в формате:\n"
-        "`+7XXXXXXXXXX` или `7XXXXXXXXXX`\n\n"
-        "Пример: +79123456789"
+        reply_markup=reply_markup
     )
 
 async def request_withdraw_callback(update: Update, context: CallbackContext):
@@ -437,13 +346,12 @@ async def request_withdraw_callback(update: Update, context: CallbackContext):
         return
     
     user = get_user_data(user_id)
-    qiwi_wallet = db.qiwi_wallets.get(user_id)
+    username = update.effective_user.username
     
-    if not qiwi_wallet:
+    if not username:
         await query.message.edit_text(
-            "⚠️ **Сначала укажите Qiwi кошелек!**\n\n"
-            "Отправьте ваш номер Qiwi кошелька в формате:\n"
-            "`+7XXXXXXXXXX` или `7XXXXXXXXXX`"
+            "⚠️ **У вас нет username!**\n\n"
+            "Установите username в Telegram и попробуйте снова."
         )
         return
     
@@ -463,18 +371,20 @@ async def request_withdraw_callback(update: Update, context: CallbackContext):
         return
     
     context.user_data["withdraw_step"] = "amount"
-    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_withdraw")]]
+    
+    keyboard = [
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel_withdraw")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.message.edit_text(
         f"💸 **Запрос вывода**\n\n"
+        f"👤 Вывод на: @{username}\n"
         f"💰 Доступно: {format_number(user['mcoin'])} {settings.currency_name}\n"
         f"📉 Минимальная сумма: {settings.min_withdraw} {settings.currency_name}\n"
-        f"📈 Максимальная сумма: {min(user['mcoin'], settings.max_withdraw)} {settings.currency_name}\n"
-        f"💳 Вывод на: `{qiwi_wallet}`\n\n"
+        f"📈 Максимальная сумма: {min(user['mcoin'], settings.max_withdraw)} {settings.currency_name}\n\n"
         f"Введите сумму вывода:",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
+        reply_markup=reply_markup
     )
 
 async def withdraw_amount_input(update: Update, context: CallbackContext):
@@ -484,32 +394,31 @@ async def withdraw_amount_input(update: Update, context: CallbackContext):
     try:
         amount = int(text)
         user = get_user_data(user_id)
-        qiwi_wallet = db.qiwi_wallets.get(user_id)
+        username = update.effective_user.username
         
         if amount < settings.min_withdraw:
             await update.message.reply_text(
                 f"❌ Минимальная сумма: {settings.min_withdraw} {settings.currency_name}\n"
-                f"Введите корректную сумму или отмените /cancel"
+                f"Введите корректную сумму или нажмите /cancel"
             )
             return
         
         if amount > user["mcoin"]:
             await update.message.reply_text(
                 f"❌ Недостаточно средств! Доступно: {format_number(user['mcoin'])} {settings.currency_name}\n"
-                f"Введите меньшую сумму или отмените /cancel"
+                f"Введите меньшую сумму или нажмите /cancel"
             )
             return
         
         if amount > settings.max_withdraw:
             await update.message.reply_text(
                 f"❌ Максимальная сумма: {settings.max_withdraw} {settings.currency_name}\n"
-                f"Введите меньшую сумму или отмените /cancel"
+                f"Введите меньшую сумму или нажмите /cancel"
             )
             return
         
         context.user_data["withdraw_amount"] = amount
         
-        # Подтверждение вывода
         commission = int(amount * settings.withdraw_commission)
         final_amount = amount - commission
         
@@ -521,19 +430,18 @@ async def withdraw_amount_input(update: Update, context: CallbackContext):
         
         await update.message.reply_text(
             f"💸 **Подтверждение вывода**\n\n"
+            f"👤 Username: @{username}\n"
             f"💰 Сумма: {amount} {settings.currency_name}\n"
             f"💳 Комиссия: {commission} {settings.currency_name}\n"
-            f"💳 К получению: {final_amount} {settings.currency_name}\n"
-            f"💳 Qiwi кошелек: `{qiwi_wallet}`\n\n"
+            f"💳 К получению: {final_amount} {settings.currency_name}\n\n"
             f"Подтвердите вывод:",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
+            reply_markup=reply_markup
         )
         
         context.user_data["withdraw_step"] = "confirm"
         
     except ValueError:
-        await update.message.reply_text("❌ Введите корректное число или отмените /cancel")
+        await update.message.reply_text("❌ Введите корректное число или нажмите /cancel")
 
 async def confirm_withdraw_final(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -545,9 +453,9 @@ async def confirm_withdraw_final(update: Update, context: CallbackContext):
         await query.message.edit_text("❌ Ошибка! Попробуйте снова /withdraw")
         return
     
-    qiwi_wallet = db.qiwi_wallets.get(user_id)
-    if not qiwi_wallet:
-        await query.message.edit_text("❌ Qiwi кошелек не найден!")
+    username = update.effective_user.username
+    if not username:
+        await query.message.edit_text("❌ Username не найден!")
         return
     
     commission = int(amount * settings.withdraw_commission)
@@ -558,29 +466,28 @@ async def confirm_withdraw_final(update: Update, context: CallbackContext):
         "amount": amount,
         "commission": commission,
         "final_amount": final_amount,
-        "method": "qiwi",
-        "qiwi_wallet": qiwi_wallet,
+        "method": "telegram_username",
+        "username": username,
         "status": "pending",
         "created_at": datetime.now().isoformat(),
         "user_data": {
-            "username": update.effective_user.username,
+            "username": username,
             "first_name": update.effective_user.first_name
         }
     }
     
-    remove_mcoins(user_id, amount, f"withdraw_request_qiwi")
+    remove_mcoins(user_id, amount, f"withdraw_request_username")
     db.save()
     
     await query.message.edit_text(
         f"✅ **Заявка на вывод создана!**\n\n"
+        f"👤 Username: @{username}\n"
         f"💰 Сумма: {amount} {settings.currency_name}\n"
         f"💳 Комиссия: {commission} {settings.currency_name}\n"
-        f"💳 К получению: {final_amount} {settings.currency_name}\n"
-        f"💳 Qiwi кошелек: `{qiwi_wallet}`\n\n"
+        f"💳 К получению: {final_amount} {settings.currency_name}\n\n"
         f"⏱️ Время обработки: до 24 часов\n"
         f"📊 Статус: Ожидает обработки\n\n"
-        f"✨ Вы получите уведомление после обработки заявки!",
-        parse_mode="Markdown"
+        f"✨ Вы получите уведомление после обработки заявки!"
     )
     
     for admin_id in settings.admin_list:
@@ -588,11 +495,10 @@ async def confirm_withdraw_final(update: Update, context: CallbackContext):
             await context.bot.send_message(
                 admin_id,
                 f"💸 **Новая заявка на вывод!**\n\n"
-                f"👤 Пользователь: {update.effective_user.first_name}\n"
+                f"👤 Пользователь: @{username}\n"
                 f"🆔 ID: {user_id}\n"
                 f"💰 Сумма: {amount} {settings.currency_name}\n"
                 f"💳 К получению: {final_amount} {settings.currency_name}\n"
-                f"💳 Qiwi: {qiwi_wallet}\n"
                 f"📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
                 f"Обработайте заявку в админ-панели!"
             )
@@ -621,7 +527,7 @@ async def withdraw_history_callback(update: Update, context: CallbackContext):
         status_emoji = "✅" if req["status"] == "completed" else "⏳" if req["status"] == "pending" else "❌"
         history_text += (
             f"{i}. {status_emoji} {req['amount']} {settings.currency_name}\n"
-            f"   Qiwi: {req.get('qiwi_wallet', 'Не указан')}\n"
+            f"   Username: @{req.get('username', 'Не указан')}\n"
             f"   Статус: {req['status']}\n"
             f"   Дата: {req['created_at'][:10]}\n\n"
         )
@@ -640,14 +546,14 @@ async def withdraw_info_callback(update: Update, context: CallbackContext):
     
     await query.message.edit_text(
         f"ℹ️ **Информация о выводе**\n\n"
-        f"💳 **Способ вывода:** Только Qiwi кошелек\n\n"
+        f"💳 **Способ вывода:** Telegram Username\n\n"
         f"💰 **Комиссия:** {settings.withdraw_commission * 100}%\n"
         f"📉 **Минимальная сумма:** {settings.min_withdraw} {settings.currency_name}\n"
         f"📈 **Максимальная сумма:** {settings.max_withdraw} {settings.currency_name}\n\n"
         f"⏱️ **Время обработки:** до 24 часов\n\n"
         f"📌 **Важно:**\n"
         f"• Вывод доступен только после выполнения заданий\n"
-        f"• Укажите корректный Qiwi кошелек\n"
+        f"• У вас должен быть установлен username в Telegram\n"
         f"• Мошеннические действия будут заблокированы\n"
         f"• Вопросы по выводу - администратору",
         reply_markup=reply_markup
@@ -676,13 +582,6 @@ async def referrals_menu(update: Update, context: CallbackContext):
     
     ref_count = len(user["referrals"])
     
-    level = 1
-    for i, lvl in enumerate(settings.ref_levels, 1):
-        if ref_count >= lvl:
-            level = i + 1
-    
-    bonus_multiplier = get_referral_bonus(ref_count)
-    
     keyboard = [
         [InlineKeyboardButton("📋 Список рефералов", callback_data="my_referrals")],
         [InlineKeyboardButton("📊 Статистика", callback_data="ref_stats")],
@@ -692,13 +591,9 @@ async def referrals_menu(update: Update, context: CallbackContext):
     
     await update.message.reply_text(
         f"👥 **Реферальная программа** 👥\n\n"
-        f"🏆 **Ваш уровень:** {level}\n"
-        f"📈 **Бонусный множитель:** x{bonus_multiplier:.2f}\n"
         f"👥 **Рефералов:** {ref_count}\n"
         f"💰 **Заработано:** {user['referral_earned']} {settings.currency_name}\n\n"
         f"🎁 **Награда за реферала:** {settings.referral_reward} {settings.currency_name}\n\n"
-        f"📊 **Следующие уровни:**\n"
-        f"{chr(10).join([f'• {lvl} рефералов - x{settings.ref_multipliers[i]}' for i, lvl in enumerate(settings.ref_levels)])}\n\n"
         f"🔗 **Ваша реферальная ссылка:**\n`{ref_link}`\n\n"
         f"Отправьте её друзьям и получайте бонусы!",
         reply_markup=reply_markup,
@@ -726,12 +621,13 @@ async def my_referrals_callback(update: Update, context: CallbackContext):
     for i, ref_id in enumerate(user["referrals"][start_idx:end_idx], start_idx + 1):
         ref_user = db.users.get(ref_id, {})
         ref_name = ref_user.get("first_name", f"User_{ref_id}")
+        ref_username = ref_user.get("username", "нет username")
         ref_earned = ref_user.get("total_earned", 0)
         ref_join = ref_user.get("join_date", "Unknown")[:10]
         active = ref_user.get("last_seen", "")
         is_active = "🟢" if active and (datetime.now() - datetime.fromisoformat(active)).days < 7 else "🔴"
         
-        referrals_list.append(f"{i}. {is_active} {ref_name} - Заработал: {ref_earned} {settings.currency_name} (с {ref_join})")
+        referrals_list.append(f"{i}. {is_active} @{ref_username} - Заработал: {ref_earned} {settings.currency_name} (с {ref_join})")
     
     text = "📋 **Ваши рефералы:**\n\n" + "\n".join(referrals_list)
     text += f"\n\n📊 Страница {page + 1} из {total_pages}"
@@ -1081,10 +977,7 @@ async def stats_menu(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     user = get_user_data(user_id)
     
-    level, exp_needed, current_exp = get_level_info(user_id)
-    
-    progress = int((current_exp / exp_needed) * 20) if exp_needed > 0 else 0
-    progress_bar = "█" * progress + "░" * (20 - progress)
+    username = update.effective_user.username or "Не установлен"
     
     keyboard = [
         [InlineKeyboardButton("📊 Детальная статистика", callback_data="detailed_stats")],
@@ -1093,16 +986,12 @@ async def stats_menu(update: Update, context: CallbackContext):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    qiwi_wallet = db.qiwi_wallets.get(user_id, "Не указан")
-    
     await update.message.reply_text(
         f"📊 **Ваша статистика** 📊\n\n"
+        f"👤 Username: @{username}\n"
         f"💰 {settings.currency_name}: {format_number(user['mcoin'])}\n"
         f"📈 Всего заработано: {format_number(user['total_earned'])}\n"
-        f"💸 Выведено: {format_number(user['total_withdrawn'])}\n"
-        f"💳 Qiwi кошелек: `{qiwi_wallet}`\n\n"
-        f"🏅 **Уровень:** {level}\n"
-        f"📈 **Прогресс:** {progress_bar} {format_number(current_exp)}/{format_number(exp_needed)}\n\n"
+        f"💸 Выведено: {format_number(user['total_withdrawn'])}\n\n"
         f"✅ Выполнено заданий: {len(user['tasks_completed'])}\n"
         f"📊 Заданий сегодня: {user['tasks_today']}/{settings.max_daily_tasks}\n"
         f"👥 Рефералов: {len(user['referrals'])}\n"
@@ -1149,9 +1038,10 @@ async def top_users_callback(update: Update, context: CallbackContext):
     top_text = "🏆 **Топ пользователей** 🏆\n\n"
     for i, (uid, data) in enumerate(sorted_users, 1):
         name = data.get("first_name", f"User_{uid}")
+        username = data.get("username", "нет username")
         if len(name) > 15:
             name = name[:15] + "..."
-        top_text += f"{'🥇' if i == 1 else '🥈' if i == 2 else '🥉' if i == 3 else f'{i}.'} {name} - {data.get('mcoin', 0)} {settings.currency_name}\n"
+        top_text += f"{'🥇' if i == 1 else '🥈' if i == 2 else '🥉' if i == 3 else f'{i}.'} @{username} - {data.get('mcoin', 0)} {settings.currency_name}\n"
     
     if not sorted_users:
         top_text = "📭 Нет пользователей"
@@ -1173,7 +1063,7 @@ async def help_menu(update: Update, context: CallbackContext):
         "Получайте бонусы за каждого реферала!\n\n"
         "**💸 Вывод средств:**\n"
         "Накопите достаточно MCoin\n"
-        "Укажите Qiwi кошелек\n"
+        "Вывод осуществляется на ваш Telegram username\n"
         "Создайте заявку на вывод\n\n"
         "**🏆 Ежедневный бонус:**\n"
         "Заходите каждый день\n"
@@ -1444,7 +1334,8 @@ async def ban_user_callback(update: Update, context: CallbackContext):
     
     await query.message.edit_text(
         "⛔ **Бан пользователя**\n\n"
-        "Введите ID пользователя для бана:",
+        "Введите @username пользователя для бана:\n"
+        "Пример: @username или username",
         reply_markup=reply_markup
     )
 
@@ -1459,7 +1350,8 @@ async def unban_user_callback(update: Update, context: CallbackContext):
     
     await query.message.edit_text(
         "✅ **Разбан пользователя**\n\n"
-        "Введите ID пользователя для разбана:",
+        "Введите @username пользователя для разбана:\n"
+        "Пример: @username или username",
         reply_markup=reply_markup
     )
 
@@ -1474,8 +1366,8 @@ async def add_mcoin_callback(update: Update, context: CallbackContext):
     
     await query.message.edit_text(
         "💰 **Добавление MCoin**\n\n"
-        "Введите ID пользователя и сумму через пробел:\n"
-        "Пример: 123456789 100",
+        "Введите @username пользователя и сумму через пробел:\n"
+        "Пример: @username 100",
         reply_markup=reply_markup
     )
 
@@ -1493,7 +1385,15 @@ async def admin_action_input(update: Update, context: CallbackContext):
     
     if action == "ban":
         try:
-            target_id = int(text)
+            username = text.strip()
+            if username.startswith("@"):
+                username = username[1:]
+            
+            target_id = get_user_by_username(username)
+            if not target_id:
+                await update.message.reply_text(f"❌ Пользователь @{username} не найден!")
+                return
+            
             if target_id in db.bans:
                 await update.message.reply_text("❌ Пользователь уже забанен!")
                 return
@@ -1505,14 +1405,22 @@ async def admin_action_input(update: Update, context: CallbackContext):
             }
             db.save()
             
-            await update.message.reply_text(f"⛔ Пользователь {target_id} забанен!")
+            await update.message.reply_text(f"⛔ Пользователь @{username} забанен!")
             
-        except ValueError:
-            await update.message.reply_text("❌ Введите корректный ID!")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка: {e}")
             
     elif action == "unban":
         try:
-            target_id = int(text)
+            username = text.strip()
+            if username.startswith("@"):
+                username = username[1:]
+            
+            target_id = get_user_by_username(username)
+            if not target_id:
+                await update.message.reply_text(f"❌ Пользователь @{username} не найден!")
+                return
+            
             if target_id not in db.bans:
                 await update.message.reply_text("❌ Пользователь не забанен!")
                 return
@@ -1520,33 +1428,43 @@ async def admin_action_input(update: Update, context: CallbackContext):
             del db.bans[target_id]
             db.save()
             
-            await update.message.reply_text(f"✅ Пользователь {target_id} разбанен!")
+            await update.message.reply_text(f"✅ Пользователь @{username} разбанен!")
             
-        except ValueError:
-            await update.message.reply_text("❌ Введите корректный ID!")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка: {e}")
             
     elif action == "add_mcoin":
         try:
             parts = text.split()
             if len(parts) != 2:
-                await update.message.reply_text("❌ Используйте: ID Сумма")
+                await update.message.reply_text("❌ Используйте: @username Сумма")
                 return
             
-            target_id = int(parts[0])
+            username = parts[0].strip()
+            if username.startswith("@"):
+                username = username[1:]
+            
             amount = int(parts[1])
             
             if amount <= 0:
                 await update.message.reply_text("❌ Сумма должна быть положительной!")
                 return
             
+            target_id = get_user_by_username(username)
+            if not target_id:
+                await update.message.reply_text(f"❌ Пользователь @{username} не найден!")
+                return
+            
             add_mcoins(target_id, amount, f"admin_add_{amount}", "other")
             
             await update.message.reply_text(
-                f"✅ Добавлено {amount} {settings.currency_name} пользователю {target_id}!"
+                f"✅ Добавлено {amount} {settings.currency_name} пользователю @{username}!"
             )
             
         except ValueError:
             await update.message.reply_text("❌ Введите корректные данные!")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка: {e}")
     
     context.user_data.pop("admin_action", None)
 
@@ -1561,8 +1479,8 @@ async def list_users_callback(update: Update, context: CallbackContext):
     users_list = []
     for uid, data in sorted(db.users.items(), key=lambda x: x[1].get("mcoin", 0), reverse=True)[:20]:
         name = data.get("first_name", f"User_{uid}")
-        qiwi = db.qiwi_wallets.get(uid, "Не указан")
-        users_list.append(f"{uid} | {name} | {data.get('mcoin', 0)} {settings.currency_name} | Qiwi: {qiwi}")
+        username = data.get("username", "нет username")
+        users_list.append(f"{uid} | @{username} | {data.get('mcoin', 0)} {settings.currency_name}")
     
     text = "📊 **Список пользователей (топ 20):**\n\n" + "\n".join(users_list)
     
@@ -1626,8 +1544,8 @@ async def admin_withdrawals_callback(update: Update, context: CallbackContext):
         if req.get("status") == "pending":
             user = db.users.get(uid, {})
             name = user.get("first_name", f"User_{uid}")
-            qiwi = req.get("qiwi_wallet", "Не указан")
-            pending.append(f"{uid} | {name} | {req['amount']} {settings.currency_name} | Qiwi: {qiwi}")
+            username = req.get("username", "Не указан")
+            pending.append(f"{uid} | @{username} | {req['amount']} {settings.currency_name}")
     
     if not pending:
         await query.message.edit_text("📭 Нет заявок на вывод!")
@@ -1657,7 +1575,7 @@ async def confirm_withdraw_callback(update: Update, context: CallbackContext):
     
     await query.message.edit_text(
         "✅ **Подтверждение вывода**\n\n"
-        "Введите ID пользователя для подтверждения вывода:",
+        "Введите @username пользователя для подтверждения вывода:",
         reply_markup=reply_markup
     )
 
@@ -1672,7 +1590,7 @@ async def reject_withdraw_callback(update: Update, context: CallbackContext):
     
     await query.message.edit_text(
         "❌ **Отклонение вывода**\n\n"
-        "Введите ID пользователя для отклонения вывода:",
+        "Введите @username пользователя для отклонения вывода:",
         reply_markup=reply_markup
     )
 
@@ -1686,7 +1604,14 @@ async def admin_withdraw_action(update: Update, context: CallbackContext):
         return
     
     try:
-        target_id = int(update.message.text)
+        username = update.message.text.strip()
+        if username.startswith("@"):
+            username = username[1:]
+        
+        target_id = get_user_by_username(username)
+        if not target_id:
+            await update.message.reply_text(f"❌ Пользователь @{username} не найден!")
+            return
         
         if target_id not in db.withdraw_requests:
             await update.message.reply_text("❌ Заявка не найдена!")
@@ -1705,10 +1630,9 @@ async def admin_withdraw_action(update: Update, context: CallbackContext):
             
             await update.message.reply_text(
                 f"✅ Вывод подтвержден!\n"
-                f"Пользователь: {target_id}\n"
+                f"Пользователь: @{username}\n"
                 f"Сумма: {request['amount']} {settings.currency_name}\n"
-                f"К получению: {request['final_amount']} {settings.currency_name}\n"
-                f"Qiwi: {request.get('qiwi_wallet', 'Не указан')}"
+                f"К получению: {request['final_amount']} {settings.currency_name}"
             )
             
             try:
@@ -1717,7 +1641,7 @@ async def admin_withdraw_action(update: Update, context: CallbackContext):
                     f"✅ **Ваша заявка на вывод подтверждена!**\n\n"
                     f"💰 Сумма: {request['amount']} {settings.currency_name}\n"
                     f"💳 К получению: {request['final_amount']} {settings.currency_name}\n"
-                    f"💳 Qiwi: {request.get('qiwi_wallet', 'Не указан')}\n\n"
+                    f"👤 Username: @{username}\n\n"
                     f"Средства будут отправлены в ближайшее время!"
                 )
             except:
@@ -1731,7 +1655,7 @@ async def admin_withdraw_action(update: Update, context: CallbackContext):
             
             await update.message.reply_text(
                 f"❌ Вывод отклонен!\n"
-                f"Пользователь: {target_id}\n"
+                f"Пользователь: @{username}\n"
                 f"Сумма возвращена на баланс."
             )
             
@@ -1740,7 +1664,7 @@ async def admin_withdraw_action(update: Update, context: CallbackContext):
                     target_id,
                     f"❌ **Ваша заявка на вывод отклонена!**\n\n"
                     f"💰 Сумма: {request['amount']} {settings.currency_name}\n"
-                    f"💳 Qiwi: {request.get('qiwi_wallet', 'Не указан')}\n\n"
+                    f"👤 Username: @{username}\n\n"
                     f"Средства возвращены на ваш баланс.\n"
                     f"По вопросам обратитесь к администратору."
                 )
@@ -1749,8 +1673,8 @@ async def admin_withdraw_action(update: Update, context: CallbackContext):
         
         db.save()
         
-    except ValueError:
-        await update.message.reply_text("❌ Введите корректный ID!")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
     
     context.user_data.pop("admin_action", None)
 
@@ -1849,7 +1773,7 @@ async def admin_settings_callback(update: Update, context: CallbackContext):
         f"🔄 Режим обслуживания: {'Включен' if settings.maintenance_mode else 'Выключен'}\n"
         f"📊 Лимит задач в день: {settings.max_daily_tasks}\n"
         f"💳 Комиссия вывода: {int(settings.withdraw_commission * 100)}%\n"
-        f"💳 Вывод только на Qiwi\n\n"
+        f"👤 Вывод на Telegram username\n\n"
         f"Выберите действие:",
         reply_markup=reply_markup
     )
@@ -1876,6 +1800,12 @@ async def start(update: Update, context: CallbackContext):
         )
         return
     
+    # Сохраняем username пользователя
+    user_data = get_user_data(user_id)
+    if update.effective_user.username:
+        user_data["username"] = update.effective_user.username
+        db.save()
+    
     if context.args and context.args[0].startswith("ref_"):
         referrer_id = int(context.args[0].replace("ref_", ""))
         if referrer_id != user_id and referrer_id not in db.bans:
@@ -1884,9 +1814,9 @@ async def start(update: Update, context: CallbackContext):
                 user_data["referrer"] = referrer_id
                 referrer_data = get_user_data(referrer_id)
                 referrer_data["referrals"].append(user_id)
-                referrer_data["referral_count"] += 1
+                referrer_data["referral_count"] = 0
                 
-                ref_reward = int(settings.referral_reward * get_referral_bonus(len(referrer_data["referrals"])))
+                ref_reward = settings.referral_reward
                 add_mcoins(referrer_id, ref_reward, "referral_bonus", "referral")
                 db.save()
                 
@@ -1896,13 +1826,10 @@ async def start(update: Update, context: CallbackContext):
                         f"👥 **Новый реферал!** 👥\n\n"
                         f"{update.effective_user.first_name} присоединился по вашей ссылке!\n"
                         f"💰 Вы получили: {ref_reward} {settings.currency_name}\n"
-                        f"📊 Всего рефералов: {len(referrer_data['referrals'])}\n"
-                        f"📈 Бонусный множитель: x{get_referral_bonus(len(referrer_data['referrals'])):.2f}"
+                        f"📊 Всего рефералов: {len(referrer_data['referrals'])}"
                     )
                 except Exception as e:
                     logger.error(f"Не удалось отправить сообщение рефереру: {e}")
-    
-    get_user_data(user_id)
     
     passed, not_passed = await check_force_subs(user_id, context.bot)
     sub_text = ""
@@ -1913,6 +1840,8 @@ async def start(update: Update, context: CallbackContext):
             f"После подписки обновите бота командой /start"
         )
     
+    username = update.effective_user.username or "Не установлен"
+    
     welcome_text = (
         f"👋 **Привет, {update.effective_user.first_name}!**\n\n"
         f"{settings.welcome_message}\n\n"
@@ -1922,7 +1851,8 @@ async def start(update: Update, context: CallbackContext):
         f"• 📋 Выполнять задания и получать {settings.currency_name}\n"
         f"• 👥 Приглашать друзей и получать бонусы\n"
         f"• 🏆 Получать ежедневные бонусы\n"
-        f"• 💸 Выводить на Qiwi кошелек\n\n"
+        f"• 💸 Выводить на Telegram username\n\n"
+        f"👤 Ваш username: @{username}\n"
         f"💰 Ваш баланс: 0 {settings.currency_name}"
         f"{sub_text}"
     )
@@ -1933,19 +1863,12 @@ async def balance_handler(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     user = get_user_data(user_id)
     
-    level, exp_needed, current_exp = get_level_info(user_id)
-    progress = int((current_exp / exp_needed) * 20) if exp_needed > 0 else 0
-    progress_bar = "█" * progress + "░" * (20 - progress)
-    
-    qiwi_wallet = db.qiwi_wallets.get(user_id, "Не указан")
+    username = update.effective_user.username or "Не установлен"
     
     await update.message.reply_text(
         f"💰 **Ваш баланс** 💰\n\n"
-        f"🎮 {settings.currency_name}: `{format_number(user['mcoin'])}`\n"
-        f"💳 Qiwi кошелек: `{qiwi_wallet}`\n\n"
-        f"📊 **Прогресс:**\n"
-        f"🏅 Уровень: {level}\n"
-        f"📈 Опыт: {progress_bar} {format_number(current_exp)}/{format_number(exp_needed)}\n\n"
+        f"👤 Username: @{username}\n"
+        f"🎮 {settings.currency_name}: `{format_number(user['mcoin'])}`\n\n"
         f"📊 **Статистика:**\n"
         f"💰 Всего заработано: {format_number(user['total_earned'])}\n"
         f"💸 Выведено: {format_number(user['total_withdrawn'])}\n"
@@ -1966,14 +1889,10 @@ async def handle_text(update: Update, context: CallbackContext):
     
     if user_id in db.users:
         db.users[user_id]["last_seen"] = datetime.now().isoformat()
-        db.users[user_id]["username"] = update.effective_user.username
+        if update.effective_user.username:
+            db.users[user_id]["username"] = update.effective_user.username
         db.users[user_id]["first_name"] = update.effective_user.first_name
         db.save()
-    
-    # Проверка на ввод Qiwi кошелька
-    if context.user_data.get("awaiting_qiwi"):
-        await set_qiwi_wallet(update, context)
-        return
     
     if context.user_data.get("withdraw_step") == "amount":
         await withdraw_amount_input(update, context)
@@ -2089,7 +2008,6 @@ def main():
     app.add_handler(CallbackQueryHandler(withdraw_info_callback, pattern="^withdraw_info$"))
     app.add_handler(CallbackQueryHandler(confirm_withdraw_final, pattern="^confirm_withdraw_final$"))
     app.add_handler(CallbackQueryHandler(cancel_withdraw, pattern="^cancel_withdraw$"))
-    app.add_handler(CallbackQueryHandler(change_qiwi_callback, pattern="^change_qiwi$"))
     
     # Callback обработчики - СТАТИСТИКА
     app.add_handler(CallbackQueryHandler(stats_menu, pattern="^stats_menu$"))
@@ -2111,7 +2029,7 @@ def main():
     print(f"📊 Администратор: {ADMIN_ID}")
     print(f"💎 Название: {settings.bot_name}")
     print(f"👥 Пользователей: {db.global_stats['total_users']}")
-    print(f"💳 Вывод только на Qiwi")
+    print(f"👤 Вывод на Telegram username")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
