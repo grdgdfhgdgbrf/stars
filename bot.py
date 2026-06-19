@@ -65,7 +65,8 @@ class BotDatabase:
             "total_referrals": 0,
         }
         self.pending_checks: Dict[int, Dict] = {}
-        self.piarflow_tasks: Dict[int, List[Dict]] = {}
+        self.current_task: Dict[int, Dict] = {}
+        self.task_queue: Dict[int, List[Dict]] = {}
         
     def save(self):
         data = {
@@ -75,7 +76,8 @@ class BotDatabase:
             "bans": self.bans,
             "global_stats": self.global_stats,
             "pending_checks": self.pending_checks,
-            "piarflow_tasks": self.piarflow_tasks
+            "current_task": self.current_task,
+            "task_queue": self.task_queue
         }
         try:
             with open(DATA_FILE, 'w', encoding='utf-8') as f:
@@ -95,7 +97,8 @@ class BotDatabase:
                     self.bans = {int(k): v for k, v in data.get("bans", {}).items()}
                     self.global_stats = data.get("global_stats", self.global_stats)
                     self.pending_checks = {int(k): v for k, v in data.get("pending_checks", {}).items()}
-                    self.piarflow_tasks = {int(k): v for k, v in data.get("piarflow_tasks", {}).items()}
+                    self.current_task = {int(k): v for k, v in data.get("current_task", {}).items()}
+                    self.task_queue = {int(k): v for k, v in data.get("task_queue", {}).items()}
                 logger.info("Данные загружены")
             except Exception as e:
                 logger.error(f"Ошибка загрузки данных: {e}")
@@ -118,8 +121,6 @@ class BotSettings:
         self.withdraw_commission = 0.05
         self.max_daily_tasks = 20
         self.maintenance_mode = False
-        self.enable_botohub = True
-        self.enable_piarflow = True
         
     def save(self):
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
@@ -178,8 +179,7 @@ def get_user_data(user_id: int) -> Dict:
             "task_earned": 0,
             "bonus_claims": 0,
             "last_withdraw_date": None,
-            "botohub_tasks": 0,
-            "piarflow_tasks": 0
+            "total_tasks_completed": 0
         }
         db.global_stats["total_users"] += 1
         db.save()
@@ -203,20 +203,13 @@ def add_mcoins(user_id: int, amount: int, reason: str = "", source: str = "other
     user["mcoin"] += amount
     user["total_earned"] += amount
     
-    if source == "task":
+    if source in ["task", "botohub", "piarflow"]:
         user["task_earned"] += amount
+        user["total_tasks_completed"] += 1
         db.global_stats["total_tasks_completed"] += 1
     elif source == "referral":
         user["referral_earned"] += amount
         db.global_stats["total_referrals"] += 1
-    elif source == "botohub":
-        user["task_earned"] += amount
-        user["botohub_tasks"] += 1
-        db.global_stats["total_tasks_completed"] += 1
-    elif source == "piarflow":
-        user["task_earned"] += amount
-        user["piarflow_tasks"] += 1
-        db.global_stats["total_tasks_completed"] += 1
     
     db.global_stats["total_mcoins_earned"] += amount
     db.save()
@@ -333,11 +326,10 @@ async def call_piarflow_api(path: str, payload: dict) -> dict:
         return {"sponsors": [], "message": str(e)}
 
 async def get_piarflow_tasks(user_id: int, chat_id: int) -> Tuple[List[Dict], str]:
-    """Получение заданий из PiarFlow"""
     payload = {
         "user_id": user_id,
         "chat_id": chat_id,
-        "max_sponsors": 5
+        "max_sponsors": 1
     }
     
     result = await call_piarflow_api("/sponsors", payload)
@@ -349,7 +341,6 @@ async def get_piarflow_tasks(user_id: int, chat_id: int) -> Tuple[List[Dict], st
         return [], result.get("message", "Ошибка получения заданий")
 
 async def check_piarflow_tasks(user_id: int, links: List[str]) -> Tuple[List[Dict], str]:
-    """Проверка выполнения заданий PiarFlow"""
     payload = {
         "user_id": user_id,
         "links": links
@@ -363,9 +354,9 @@ async def check_piarflow_tasks(user_id: int, links: List[str]) -> Tuple[List[Dic
     else:
         return [], result.get("message", "Ошибка проверки")
 
-# ========== ЗАДАНИЯ (ОБЪЕДИНЕННЫЙ РЕЖИМ) ==========
+# ========== ЗАДАНИЯ (ПО ОДНОМУ) ==========
 async def tasks_mode(update: Update, context: CallbackContext):
-    """Объединенный режим заданий с BotoHub и PiarFlow"""
+    """Получение одного задания"""
     user_id = update.effective_user.id
     
     if settings.maintenance_mode:
@@ -400,50 +391,54 @@ async def tasks_mode(update: Update, context: CallbackContext):
         )
         return
     
-    msg = await update.message.reply_text("🔄 Получаем задания...")
+    # Проверяем есть ли задание в очереди
+    if user_id in db.task_queue and db.task_queue[user_id]:
+        task = db.task_queue[user_id].pop(0)
+        await show_task(update, context, task, user_id)
+        return
     
-    all_tasks = []
-    task_sources = []
+    msg = await update.message.reply_text("🔄 Получаем задание...")
     
-    # 1. Получаем задания из BotoHub
-    if settings.enable_botohub:
+    # Пробуем получить задание из BotoHub
+    botohub_task = None
+    piarflow_task = None
+    
+    try:
+        result = await call_botohub_api(user_id, is_task=True, skip=False)
+        tasks = result.get("tasks", [])
+        completed = result.get("completed", False)
+        
+        if not completed and tasks:
+            botohub_task = {
+                "link": tasks[0],
+                "price": settings.task_reward,
+                "source": "botohub",
+                "type": "BotoHub"
+            }
+    except Exception as e:
+        logger.error(f"Ошибка BotoHub: {e}")
+    
+    # Если нет задания из BotoHub, пробуем PiarFlow
+    if not botohub_task:
         try:
-            botohub_result = await call_botohub_api(user_id, is_task=True, skip=False)
-            botohub_tasks = botohub_result.get("tasks", [])
-            
-            if botohub_tasks and not botohub_result.get("completed", False):
-                for url in botohub_tasks:
-                    all_tasks.append({
-                        "link": url,
-                        "source": "BotoHub",
-                        "price": settings.task_reward,
-                        "status": "unsubscribed"
-                    })
-                    task_sources.append("botohub")
-                db.pending_checks[user_id] = {"source": "botohub", "tasks": botohub_tasks}
-        except Exception as e:
-            logger.error(f"Ошибка получения BotoHub заданий: {e}")
-    
-    # 2. Получаем задания из PiarFlow
-    if settings.enable_piarflow:
-        try:
-            piarflow_tasks, piarflow_msg = await get_piarflow_tasks(user_id, update.message.chat.id)
-            
+            piarflow_tasks, msg_pf = await get_piarflow_tasks(user_id, update.message.chat.id)
             if piarflow_tasks:
-                for task in piarflow_tasks:
-                    all_tasks.append({
-                        "link": task.get("link", ""),
-                        "source": "PiarFlow",
-                        "price": task.get("price", settings.task_reward),
-                        "status": task.get("status", "unsubscribed"),
-                        "original": task
-                    })
-                    task_sources.append("piarflow")
-                db.piarflow_tasks[user_id] = piarflow_tasks
+                piarflow_task = {
+                    "link": piarflow_tasks[0].get("link", ""),
+                    "price": piarflow_tasks[0].get("price", settings.task_reward),
+                    "source": "piarflow",
+                    "type": "PiarFlow",
+                    "original": piarflow_tasks[0]
+                }
         except Exception as e:
-            logger.error(f"Ошибка получения PiarFlow заданий: {e}")
+            logger.error(f"Ошибка PiarFlow: {e}")
     
-    if not all_tasks:
+    # Выбираем задание
+    if botohub_task:
+        task = botohub_task
+    elif piarflow_task:
+        task = piarflow_task
+    else:
         await msg.edit_text(
             "🎉 **Нет активных заданий!**\n\n"
             "Пожалуйста, зайдите позже.\n"
@@ -453,187 +448,228 @@ async def tasks_mode(update: Update, context: CallbackContext):
         )
         return
     
-    # Отображаем задания с пометками источника
-    tasks_text = "📢 **Новые задания!** 📢\n\n"
-    keyboard = []
+    await show_task(update, context, task, user_id)
+
+async def show_task(update: Update, context: CallbackContext, task: Dict, user_id: int):
+    """Показывает одно задание"""
+    if isinstance(update, Update):
+        if update.callback_query:
+            query = update.callback_query
+            await query.answer()
+            await query.message.edit_text("🔄 Загружаем задание...")
+            msg = query.message
+        else:
+            msg = await update.message.reply_text("🔄 Загружаем задание...")
+    else:
+        msg = await update.message.reply_text("🔄 Загружаем задание...")
     
-    for i, task in enumerate(all_tasks):
-        source_emoji = "🔵" if task["source"] == "BotoHub" else "🟢"
-        tasks_text += f"{source_emoji} **Задание {i+1}** ({task['source']})\n"
-        tasks_text += f"🔗 {task['link']}\n"
-        tasks_text += f"💰 Награда: {task['price']} {settings.currency_name}\n\n"
-        
-        keyboard.append([InlineKeyboardButton(
-            f"Выполнить ({task['source']})", 
-            url=task["link"]
-        )])
+    task_url = task.get("link", "")
+    task_price = task.get("price", settings.task_reward)
+    task_source = task.get("source", "unknown")
     
-    keyboard.append([InlineKeyboardButton("✅ Проверить все", callback_data="check_all_tasks")])
-    keyboard.append([InlineKeyboardButton("❌ Пропустить", callback_data="skip_all_tasks")])
+    # Сохраняем текущее задание
+    db.current_task[user_id] = task
+    
+    keyboard = [
+        [InlineKeyboardButton("📎 Перейти к заданию", url=task_url)],
+        [InlineKeyboardButton("✅ Проверить выполнение", callback_data=f"check_task_{user_id}")],
+        [InlineKeyboardButton("⏩ Пропустить", callback_data=f"skip_task_{user_id}")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # Сохраняем все задания в контекст
-    context.user_data["all_tasks"] = all_tasks
-    context.user_data["task_sources"] = task_sources
-    
-    await msg.edit_text(
-        tasks_text + f"📊 **Сегодня выполнено:** {user['tasks_today']}/{settings.max_daily_tasks}\n\n"
-        f"Выполните задания и нажмите «Проверить все»",
-        reply_markup=reply_markup,
-        disable_web_page_preview=True
+    task_text = (
+        f"📢 **Новое задание!** 📢\n\n"
+        f"🔗 **Ссылка:** {task_url}\n\n"
+        f"💰 **Награда:** {task_price} {settings.currency_name}\n\n"
+        f"**Как выполнить:**\n"
+        f"1️⃣ Нажмите «Перейти к заданию»\n"
+        f"2️⃣ Подпишитесь на канал\n"
+        f"3️⃣ Вернитесь и нажмите «Проверить выполнение»\n\n"
+        f"⏱️ Время на выполнение: 3 минуты\n"
+        f"✨ Удачи!"
     )
+    
+    if isinstance(update, Update) and update.callback_query:
+        await msg.edit_text(task_text, reply_markup=reply_markup, disable_web_page_preview=True)
+    else:
+        await msg.edit_text(task_text, reply_markup=reply_markup, disable_web_page_preview=True)
 
-async def check_all_tasks_callback(update: Update, context: CallbackContext):
-    """Проверка всех заданий (BotoHub + PiarFlow)"""
+async def check_task_callback(update: Update, context: CallbackContext):
+    """Проверка выполнения задания"""
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
     
-    await query.edit_message_text("🔍 **Проверяем выполнение заданий...**\n\nПожалуйста, подождите...")
+    user_id = int(query.data.replace("check_task_", ""))
     
-    all_tasks = context.user_data.get("all_tasks", [])
-    if not all_tasks:
-        await query.edit_message_text("❌ Нет активных заданий для проверки.")
+    if user_id != query.from_user.id:
+        await query.answer("⛔ Это не ваше задание!", show_alert=True)
         return
     
-    user = get_user_data(user_id)
-    completed_count = 0
-    total_reward = 0
-    errors = []
-    results = []
+    if user_id not in db.current_task:
+        await query.message.edit_text("❌ Нет активного задания для проверки.")
+        return
     
-    # Разделяем задания по источникам
-    botohub_tasks = [t for t in all_tasks if t["source"] == "BotoHub"]
-    piarflow_tasks = [t for t in all_tasks if t["source"] == "PiarFlow"]
+    task = db.current_task[user_id]
+    task_source = task.get("source", "unknown")
+    task_url = task.get("link", "")
+    task_price = task.get("price", settings.task_reward)
     
-    # Проверка BotoHub
-    if botohub_tasks:
-        try:
+    await query.message.edit_text("🔍 **Проверяем выполнение задания...**\n\nПожалуйста, подождите...")
+    
+    try:
+        if task_source == "botohub":
             result = await call_botohub_api(user_id, is_task=True, skip=False)
             prev_success = result.get("prev_success", False)
+            completed = result.get("completed", False)
             
             if prev_success:
-                # Все задания BotoHub выполнены
-                for task in botohub_tasks:
-                    reward = task.get("price", settings.task_reward)
-                    add_mcoins(user_id, reward, f"botohub_task_{task['link']}", "botohub")
-                    completed_count += 1
-                    total_reward += reward
-                    results.append(f"✅ BotoHub: {task['link']} - выполнено (+{reward} {settings.currency_name})")
+                add_mcoins(user_id, task_price, f"botohub_task_{task_url}", "task")
+                user = get_user_data(user_id)
+                user["tasks_today"] += 1
+                db.save()
+                
+                # Удаляем текущее задание
+                db.current_task.pop(user_id, None)
+                
+                await query.message.edit_text(
+                    f"✅ **Задание выполнено!** ✅\n\n"
+                    f"💰 Вы получили: {task_price} {settings.currency_name}\n"
+                    f"📊 Сегодня выполнено: {user['tasks_today']}/{settings.max_daily_tasks}\n"
+                    f"💰 Ваш баланс: {format_number(user['mcoin'])} {settings.currency_name}\n\n"
+                    f"Хотите получить следующее задание?",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📋 Следующее задание", callback_data="next_task")],
+                        [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
+                    ])
+                )
             else:
-                results.append("⏳ BotoHub: задания еще не выполнены")
-        except Exception as e:
-            errors.append(f"BotoHub ошибка: {e}")
-    
-    # Проверка PiarFlow
-    if piarflow_tasks:
-        try:
-            links = [t["link"] for t in piarflow_tasks]
-            check_result, msg = await check_piarflow_tasks(user_id, links)
+                await query.message.edit_text(
+                    f"❌ **Вы ещё не выполнили задание!** ❌\n\n"
+                    f"🔗 Пожалуйста, подпишитесь:\n{task_url}\n\n"
+                    f"**Инструкция:**\n"
+                    f"1️⃣ Нажмите на ссылку выше\n"
+                    f"2️⃣ Нажмите «Подписаться» или «Join»\n"
+                    f"3️⃣ Вернитесь и нажмите «Проверить выполнение»\n\n"
+                    f"⏱️ У вас есть 3 минуты на выполнение",
+                    disable_web_page_preview=True
+                )
+                
+                keyboard = [
+                    [InlineKeyboardButton("📎 Перейти к заданию", url=task_url)],
+                    [InlineKeyboardButton("✅ Проверить выполнение", callback_data=f"check_task_{user_id}")],
+                    [InlineKeyboardButton("⏩ Пропустить", callback_data=f"skip_task_{user_id}")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.edit_message_reply_markup(reply_markup)
+                
+        elif task_source == "piarflow":
+            check_result, msg = await check_piarflow_tasks(user_id, [task_url])
             
             if check_result:
                 all_subscribed = all(item.get("status") == "subscribed" for item in check_result)
                 
                 if all_subscribed:
-                    for task in piarflow_tasks:
-                        reward = task.get("price", settings.task_reward)
-                        add_mcoins(user_id, reward, f"piarflow_task_{task['link']}", "piarflow")
-                        completed_count += 1
-                        total_reward += reward
-                        results.append(f"✅ PiarFlow: {task['link']} - выполнено (+{reward} {settings.currency_name})")
+                    add_mcoins(user_id, task_price, f"piarflow_task_{task_url}", "task")
+                    user = get_user_data(user_id)
+                    user["tasks_today"] += 1
+                    db.save()
+                    
+                    db.current_task.pop(user_id, None)
+                    
+                    await query.message.edit_text(
+                        f"✅ **Задание выполнено!** ✅\n\n"
+                        f"💰 Вы получили: {task_price} {settings.currency_name}\n"
+                        f"📊 Сегодня выполнено: {user['tasks_today']}/{settings.max_daily_tasks}\n"
+                        f"💰 Ваш баланс: {format_number(user['mcoin'])} {settings.currency_name}\n\n"
+                        f"Хотите получить следующее задание?",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("📋 Следующее задание", callback_data="next_task")],
+                            [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
+                        ])
+                    )
                 else:
-                    # Проверяем каждое задание отдельно
-                    for item in check_result:
-                        if item.get("status") == "subscribed":
-                            for task in piarflow_tasks:
-                                if task["link"] == item["link"]:
-                                    reward = task.get("price", settings.task_reward)
-                                    add_mcoins(user_id, reward, f"piarflow_task_{task['link']}", "piarflow")
-                                    completed_count += 1
-                                    total_reward += reward
-                                    results.append(f"✅ PiarFlow: {task['link']} - выполнено (+{reward} {settings.currency_name})")
-                        else:
-                            for task in piarflow_tasks:
-                                if task["link"] == item["link"]:
-                                    results.append(f"❌ PiarFlow: {task['link']} - не выполнено")
+                    await query.message.edit_text(
+                        f"❌ **Вы ещё не выполнили задание!** ❌\n\n"
+                        f"🔗 Пожалуйста, подпишитесь:\n{task_url}\n\n"
+                        f"**Инструкция:**\n"
+                        f"1️⃣ Нажмите на ссылку выше\n"
+                        f"2️⃣ Нажмите «Подписаться» или «Join»\n"
+                        f"3️⃣ Вернитесь и нажмите «Проверить выполнение»\n\n"
+                        f"⏱️ У вас есть 3 минуты на выполнение",
+                        disable_web_page_preview=True
+                    )
+                    
+                    keyboard = [
+                        [InlineKeyboardButton("📎 Перейти к заданию", url=task_url)],
+                        [InlineKeyboardButton("✅ Проверить выполнение", callback_data=f"check_task_{user_id}")],
+                        [InlineKeyboardButton("⏩ Пропустить", callback_data=f"skip_task_{user_id}")]
+                    ]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    await query.edit_message_reply_markup(reply_markup)
             else:
-                results.append(f"⏳ PiarFlow: {msg}")
-        except Exception as e:
-            errors.append(f"PiarFlow ошибка: {e}")
-    
-    # Обновляем статистику пользователя
-    if completed_count > 0:
-        user["tasks_today"] += completed_count
-        db.save()
-    
-    # Формируем результат
-    result_text = "📊 **Результаты проверки:**\n\n"
-    result_text += "\n".join(results)
-    
-    if completed_count > 0:
-        result_text += f"\n\n✅ **Выполнено заданий:** {completed_count}"
-        result_text += f"\n💰 **Получено:** {total_reward} {settings.currency_name}"
-        result_text += f"\n📊 **Сегодня выполнено:** {user['tasks_today']}/{settings.max_daily_tasks}"
-        result_text += f"\n💰 **Ваш баланс:** {format_number(user['mcoin'])} {settings.currency_name}"
-    else:
-        result_text += "\n\n⚠️ **Ни одно задание не выполнено.**\n"
-        result_text += "Убедитесь, что вы подписались на все каналы и нажмите «Проверить все» снова."
-    
-    if errors:
-        result_text += f"\n\n⚠️ **Ошибки:**\n" + "\n".join(errors)
-    
-    # Кнопка для повторной проверки
-    keyboard = [
-        [InlineKeyboardButton("🔄 Проверить еще раз", callback_data="check_all_tasks")],
-        [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(result_text, reply_markup=reply_markup)
+                await query.message.edit_text(
+                    f"❌ **Ошибка проверки:** {msg}\n\n"
+                    f"Попробуйте позже или перейдите к следующему заданию.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("⏩ Следующее задание", callback_data="next_task")],
+                        [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
+                    ])
+                )
+                
+    except Exception as e:
+        logger.error(f"Ошибка проверки задания: {e}")
+        await query.message.edit_text(
+            f"❌ Ошибка при проверке: {e}\n\nПопробуйте еще раз.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Проверить еще раз", callback_data=f"check_task_{user_id}")],
+                [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
+            ])
+        )
 
-async def skip_all_tasks_callback(update: Update, context: CallbackContext):
-    """Пропуск всех заданий"""
+async def skip_task_callback(update: Update, context: CallbackContext):
+    """Пропуск задания"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = int(query.data.replace("skip_task_", ""))
+    
+    if user_id != query.from_user.id:
+        await query.answer("⛔ Это не ваше задание!", show_alert=True)
+        return
+    
+    if user_id in db.current_task:
+        task = db.current_task[user_id]
+        
+        # Пропускаем через API
+        try:
+            if task.get("source") == "botohub":
+                await call_botohub_api(user_id, is_task=True, skip=True)
+            elif task.get("source") == "piarflow":
+                # Для PiarFlow просто удаляем задание
+                pass
+        except Exception as e:
+            logger.error(f"Ошибка пропуска задания: {e}")
+        
+        db.current_task.pop(user_id, None)
+    
+    await query.message.edit_text(
+        "⏩ **Задание пропущено!**\n\n"
+        "Хотите получить следующее задание?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 Следующее задание", callback_data="next_task")],
+            [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
+        ])
+    )
+
+async def next_task_callback(update: Update, context: CallbackContext):
+    """Получение следующего задания"""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     
-    await query.edit_message_text("⏩ **Пропускаем задания...**")
+    await query.message.edit_text("🔄 Получаем следующее задание...")
     
-    all_tasks = context.user_data.get("all_tasks", [])
-    botohub_tasks = [t for t in all_tasks if t["source"] == "BotoHub"]
-    piarflow_tasks = [t for t in all_tasks if t["source"] == "PiarFlow"]
-    
-    results = []
-    
-    # Пропускаем BotoHub
-    if botohub_tasks:
-        try:
-            await call_botohub_api(user_id, is_task=True, skip=True)
-            results.append("⏩ BotoHub: задания пропущены")
-        except Exception as e:
-            results.append(f"❌ BotoHub ошибка: {e}")
-    
-    # Пропускаем PiarFlow (отмечаем как выполненные для обновления статуса)
-    if piarflow_tasks:
-        results.append("⏩ PiarFlow: задания пропущены (повторите позже)")
-    
-    # Очищаем данные
-    context.user_data.pop("all_tasks", None)
-    context.user_data.pop("task_sources", None)
-    if user_id in db.piarflow_tasks:
-        db.piarflow_tasks.pop(user_id, None)
-    if user_id in db.pending_checks:
-        db.pending_checks.pop(user_id, None)
-    
-    keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        "⏩ **Задания пропущены!**\n\n"
-        + "\n".join(results) + "\n\n"
-        "Вы можете получить новые задания позже.",
-        reply_markup=reply_markup
-    )
+    await tasks_mode(update, context)
 
 # ========== ВЫВОД СРЕДСТВ ==========
 async def withdraw_menu(update: Update, context: CallbackContext):
@@ -1131,13 +1167,11 @@ async def stats_menu(update: Update, context: CallbackContext):
         f"💰 {settings.currency_name}: {format_number(user['mcoin'])}\n"
         f"📈 Всего заработано: {format_number(user['total_earned'])}\n"
         f"💸 Выведено: {format_number(user['total_withdrawn'])}\n\n"
-        f"✅ Выполнено заданий: {len(user['tasks_completed'])}\n"
+        f"✅ Выполнено заданий: {user['total_tasks_completed']}\n"
         f"📊 Заданий сегодня: {user['tasks_today']}/{settings.max_daily_tasks}\n"
         f"👥 Рефералов: {len(user['referrals'])}\n"
         f"🔥 Серия: {user['daily_streak']} дней\n"
-        f"📅 В боте: {(datetime.now() - datetime.fromisoformat(user['join_date'])).days} дней\n"
-        f"🔵 BotoHub: {user.get('botohub_tasks', 0)} заданий\n"
-        f"🟢 PiarFlow: {user.get('piarflow_tasks', 0)} заданий",
+        f"📅 В боте: {(datetime.now() - datetime.fromisoformat(user['join_date'])).days} дней",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -1160,11 +1194,9 @@ async def detailed_stats_callback(update: Update, context: CallbackContext):
         f"• С рефералов: {user['referral_earned']} {settings.currency_name}\n"
         f"• С бонусов: {user['bonus_claims']} раз\n\n"
         f"📊 **Активность:**\n"
-        f"• Заданий выполнено: {len(user['tasks_completed'])}\n"
+        f"• Заданий выполнено: {user['total_tasks_completed']}\n"
         f"• Рефералов приглашено: {len(user['referrals'])}\n"
-        f"• Выводов: {completed_withdrawals}\n"
-        f"🔵 BotoHub: {user.get('botohub_tasks', 0)}\n"
-        f"🟢 PiarFlow: {user.get('piarflow_tasks', 0)}\n\n"
+        f"• Выводов: {completed_withdrawals}\n\n"
         f"📅 **Даты:**\n"
         f"• В боте с: {user['join_date'][:10]}\n"
         f"• Последний визит: {user['last_seen'][:10] if user.get('last_seen') else 'Неизвестно'}\n"
@@ -1200,9 +1232,8 @@ async def help_menu(update: Update, context: CallbackContext):
         "❓ **Помощь** ❓\n\n"
         "**📋 Задания:**\n"
         "Нажмите кнопку «Задания» или /tasks\n"
-        "Выполняйте задания из двух сервисов:\n"
-        "🔵 BotoHub - классические задания\n"
-        "🟢 PiarFlow - задания с наградами\n\n"
+        "Вы получаете одно задание за раз\n"
+        "После выполнения можно взять следующее\n\n"
         "**👥 Рефералы:**\n"
         "Приглашайте друзей по ссылке\n"
         "Получайте бонусы за каждого реферала!\n\n"
@@ -1249,8 +1280,6 @@ async def admin_panel(update: Update, context: CallbackContext):
         f"💰 Всего заработано: {format_number(db.global_stats['total_mcoins_earned'])} {settings.currency_name}\n"
         f"✅ Заданий выполнено: {db.global_stats['total_tasks_completed']}\n"
         f"💸 Ожидают вывода: {pending_withdrawals}\n\n"
-        f"🔵 BotoHub: {'Включен' if settings.enable_botohub else 'Выключен'}\n"
-        f"🟢 PiarFlow: {'Включен' if settings.enable_piarflow else 'Выключен'}\n\n"
         f"Выберите действие:",
         reply_markup=reply_markup
     )
@@ -1677,9 +1706,7 @@ async def admin_stats_callback(update: Update, context: CallbackContext):
         f"• Всего: {total_withdraw_requests}\n\n"
         f"✅ **Задания:**\n"
         f"• Всего выполнено: {total_tasks}\n"
-        f"• В среднем на пользователя: {total_tasks // total_users if total_users > 0 else 0}\n\n"
-        f"🔵 BotoHub: {'Включен' if settings.enable_botohub else 'Выключен'}\n"
-        f"🟢 PiarFlow: {'Включен' if settings.enable_piarflow else 'Выключен'}",
+        f"• В среднем на пользователя: {total_tasks // total_users if total_users > 0 else 0}",
         reply_markup=reply_markup
     )
 
@@ -1913,8 +1940,6 @@ async def admin_settings_callback(update: Update, context: CallbackContext):
         [InlineKeyboardButton(f"🔄 Режим обслуживания: {settings.maintenance_mode}", callback_data="toggle_maintenance")],
         [InlineKeyboardButton(f"📊 Лимит задач: {settings.max_daily_tasks}", callback_data="set_max_tasks")],
         [InlineKeyboardButton(f"💳 Комиссия вывода: {int(settings.withdraw_commission * 100)}%", callback_data="set_withdraw_commission")],
-        [InlineKeyboardButton(f"🔵 BotoHub: {'✅' if settings.enable_botohub else '❌'}", callback_data="toggle_botohub")],
-        [InlineKeyboardButton(f"🟢 PiarFlow: {'✅' if settings.enable_piarflow else '❌'}", callback_data="toggle_piarflow")],
         [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1924,9 +1949,7 @@ async def admin_settings_callback(update: Update, context: CallbackContext):
         f"🔄 Режим обслуживания: {'Включен' if settings.maintenance_mode else 'Выключен'}\n"
         f"📊 Лимит задач в день: {settings.max_daily_tasks}\n"
         f"💳 Комиссия вывода: {int(settings.withdraw_commission * 100)}%\n"
-        f"👤 Вывод на Telegram username\n"
-        f"🔵 BotoHub: {'Включен' if settings.enable_botohub else 'Выключен'}\n"
-        f"🟢 PiarFlow: {'Включен' if settings.enable_piarflow else 'Выключен'}\n\n"
+        f"👤 Вывод на Telegram username\n\n"
         f"Выберите действие:",
         reply_markup=reply_markup
     )
@@ -1940,26 +1963,6 @@ async def toggle_maintenance_callback(update: Update, context: CallbackContext):
     
     status = "включен" if settings.maintenance_mode else "выключен"
     await query.message.edit_text(f"🔄 Режим обслуживания {status}!")
-
-async def toggle_botohub_callback(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    
-    settings.enable_botohub = not settings.enable_botohub
-    settings.save()
-    
-    status = "включен" if settings.enable_botohub else "выключен"
-    await query.message.edit_text(f"🔵 BotoHub {status}!")
-
-async def toggle_piarflow_callback(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    
-    settings.enable_piarflow = not settings.enable_piarflow
-    settings.save()
-    
-    status = "включен" if settings.enable_piarflow else "выключен"
-    await query.message.edit_text(f"🟢 PiarFlow {status}!")
 
 # ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
 async def start(update: Update, context: CallbackContext):
@@ -2019,9 +2022,7 @@ async def start(update: Update, context: CallbackContext):
         f"💎 **{settings.bot_name}**\n"
         f"{settings.bot_description}\n\n"
         f"✨ **Что вы можете делать:**\n"
-        f"• 📋 Выполнять задания из двух сервисов:\n"
-        f"  🔵 BotoHub\n"
-        f"  🟢 PiarFlow\n"
+        f"• 📋 Выполнять задания по одному\n"
         f"• 👥 Приглашать друзей и получать бонусы\n"
         f"• 🏆 Получать ежедневные бонусы\n"
         f"• 💸 Выводить на Telegram username\n\n"
@@ -2047,8 +2048,6 @@ async def balance_handler(update: Update, context: CallbackContext):
         f"💸 Выведено: {format_number(user['total_withdrawn'])}\n"
         f"✅ С заданий: {format_number(user['task_earned'])}\n"
         f"👥 С рефералов: {format_number(user['referral_earned'])}\n"
-        f"🔵 BotoHub: {user.get('botohub_tasks', 0)} заданий\n"
-        f"🟢 PiarFlow: {user.get('piarflow_tasks', 0)} заданий\n"
         f"📅 В боте: {(datetime.now() - datetime.fromisoformat(user['join_date'])).days} дней\n"
         f"🔥 Серия: {user['daily_streak']} дней",
         parse_mode="Markdown"
@@ -2150,8 +2149,9 @@ def main():
     app.add_handler(CommandHandler("cancel", cancel_command))
     
     # Callback обработчики - ЗАДАНИЯ
-    app.add_handler(CallbackQueryHandler(check_all_tasks_callback, pattern="^check_all_tasks$"))
-    app.add_handler(CallbackQueryHandler(skip_all_tasks_callback, pattern="^skip_all_tasks$"))
+    app.add_handler(CallbackQueryHandler(check_task_callback, pattern="^check_task_"))
+    app.add_handler(CallbackQueryHandler(skip_task_callback, pattern="^skip_task_"))
+    app.add_handler(CallbackQueryHandler(next_task_callback, pattern="^next_task$"))
     
     # Callback обработчики - АДМИН
     app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
@@ -2174,8 +2174,6 @@ def main():
     app.add_handler(CallbackQueryHandler(send_mailing_callback, pattern="^send_mailing$"))
     app.add_handler(CallbackQueryHandler(admin_settings_callback, pattern="^admin_settings$"))
     app.add_handler(CallbackQueryHandler(toggle_maintenance_callback, pattern="^toggle_maintenance$"))
-    app.add_handler(CallbackQueryHandler(toggle_botohub_callback, pattern="^toggle_botohub$"))
-    app.add_handler(CallbackQueryHandler(toggle_piarflow_callback, pattern="^toggle_piarflow$"))
     
     # Callback обработчики - РЕФЕРАЛЫ
     app.add_handler(CallbackQueryHandler(referrals_menu, pattern="^referrals_menu$"))
@@ -2212,8 +2210,7 @@ def main():
     print(f"💎 Название: {settings.bot_name}")
     print(f"👥 Пользователей: {db.global_stats['total_users']}")
     print(f"👤 Вывод на Telegram username")
-    print(f"🔵 BotoHub: {'Включен' if settings.enable_botohub else 'Выключен'}")
-    print(f"🟢 PiarFlow: {'Включен' if settings.enable_piarflow else 'Выключен'}")
+    print(f"📋 Задания выдаются по одному")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
