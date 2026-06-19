@@ -3,8 +3,10 @@ import random
 import json
 import os
 import logging
+import re
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, Any
+from collections import defaultdict
 import time
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
@@ -27,16 +29,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ========== КОНФИГУРАЦИЯ ==========
-BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"
+BOT_TOKEN = "8251949164:AAHe6RTvf3OXniMVZd7_ICCH1BPtRNxHKFo"
 BOTOHUB_TOKEN = "c72ddc9b-c2dc-4e3e-a985-7d51f0d77f58"
 BOTOHUB_API_URL = "https://botohub.me/get-tasks"
 ADMIN_ID = 5356400377
 
 # Состояния для ConversationHandler
-(AWAITING_WITHDRAW_AMOUNT, AWAITING_WITHDRAW_WALLET, AWAITING_BAN_USER,
+(AWAITING_WITHDRAW_AMOUNT, AWAITING_WITHDRAW_WALLET, AWAITING_PROMO_CODE,
+ AWAITING_PROMO_REWARD, AWAITING_PROMO_EXPIRY, AWAITING_BAN_USER,
  AWAITING_UNBAN_USER, AWAITING_ADD_MCOIN, MAILING_TEXT,
- AWAITING_SETTING_VALUE, AWAITING_FORCE_SUB_INPUT,
- AWAITING_PROMO_CODE, AWAITING_PROMO_REWARD, AWAITING_PROMO_EXPIRY) = range(11)
+ AWAITING_SETTING_VALUE, AWAITING_FORCE_SUB_INPUT) = range(12)
 
 # Файлы для хранения данных
 DATA_FILE = "bot_data.json"
@@ -57,6 +59,7 @@ class BotDatabase:
             "total_tasks_completed": 0,
             "total_referrals": 0,
         }
+        self.pending_checks: Dict[int, Dict] = {}
         
     def save(self):
         data = {
@@ -65,7 +68,8 @@ class BotDatabase:
             "withdraw_requests": self.withdraw_requests,
             "task_history": self.task_history,
             "bans": self.bans,
-            "global_stats": self.global_stats
+            "global_stats": self.global_stats,
+            "pending_checks": self.pending_checks
         }
         try:
             with open(DATA_FILE, 'w', encoding='utf-8') as f:
@@ -85,6 +89,7 @@ class BotDatabase:
                     self.task_history = {int(k): v for k, v in data.get("task_history", {}).items()}
                     self.bans = {int(k): v for k, v in data.get("bans", {}).items()}
                     self.global_stats = data.get("global_stats", self.global_stats)
+                    self.pending_checks = {int(k): v for k, v in data.get("pending_checks", {}).items()}
                 logger.info("Данные загружены")
             except Exception as e:
                 logger.error(f"Ошибка загрузки данных: {e}")
@@ -106,11 +111,10 @@ class BotSettings:
         self.bot_name = "MCoin Bot"
         self.bot_description = "Зарабатывай MCoin выполняя задания!"
         self.currency_name = "MCoin"
-        self.withdraw_method = "TON Wallet"
         self.withdraw_commission = 0.05
         self.max_daily_tasks = 20
         self.maintenance_mode = False
-        self.ton_wallet_address = "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c"  # Заменить на реальный адрес
+        self.withdraw_wallet = "ТЮКОШЕЛЕК"  # Кошелек для вывода
         
     def save(self):
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
@@ -138,7 +142,7 @@ def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(f"💰 {settings.currency_name}"), KeyboardButton("📋 Задания")],
         [KeyboardButton("👥 Рефералы"), KeyboardButton("🏆 Ежедневный бонус")],
-        [KeyboardButton("💸 Вывод средств")],
+        [KeyboardButton("💸 Вывод средств"), KeyboardButton("🎫 Промокоды")],
         [KeyboardButton("📊 Статистика"), KeyboardButton("❓ Помощь")]
     ]
     
@@ -170,8 +174,7 @@ def get_user_data(user_id: int) -> Dict:
             "referral_earned": 0,
             "task_earned": 0,
             "bonus_claims": 0,
-            "last_withdraw_date": None,
-            "ton_wallet": None
+            "last_withdraw_date": None
         }
         db.global_stats["total_users"] += 1
         db.save()
@@ -317,7 +320,7 @@ async def call_botohub_api(chat_id: int, is_task: bool = False, skip: bool = Fal
         logger.error(f"BotoHub API исключение: {e}")
         return {"tasks": [], "completed": False, "skip": True}
 
-# ========== ВЫВОД СРЕДСТВ (TON) ==========
+# ========== ВЫВОД СРЕДСТВ ==========
 async def withdraw_menu(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     user = get_user_data(user_id)
@@ -346,20 +349,19 @@ async def withdraw_menu(update: Update, context: CallbackContext):
     pending = db.withdraw_requests.get(user_id, {}).get("status") == "pending"
     pending_text = "\n⚠️ У вас есть активная заявка на вывод!" if pending else ""
     
-    wallet_info = f"💳 Ваш TON кошелек: {user.get('ton_wallet', 'Не указан')}" if user.get("ton_wallet") else "💳 TON кошелек не указан"
-    
     await update.message.reply_text(
         f"💸 **Вывод средств** 💸\n\n"
         f"💰 Доступно: {format_number(user['mcoin'])} {settings.currency_name}\n"
         f"📉 Минимальная сумма: {settings.min_withdraw} {settings.currency_name}\n"
         f"📈 Максимальная сумма: {settings.max_withdraw} {settings.currency_name}\n"
         f"💳 Комиссия: {settings.withdraw_commission * 100}%\n\n"
-        f"💳 **Способ вывода:** TON Wallet (USDT)\n"
-        f"{wallet_info}\n\n"
+        f"💳 **Кошелек для вывода:**\n"
+        f"`{settings.withdraw_wallet}`\n\n"
         f"⏱️ Время обработки: до 24 часов\n"
         f"{pending_text}\n\n"
         f"Нажмите «Запросить вывод» для создания заявки",
-        reply_markup=reply_markup
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
     )
 
 async def request_withdraw_callback(update: Update, context: CallbackContext):
@@ -388,11 +390,8 @@ async def request_withdraw_callback(update: Update, context: CallbackContext):
         )
         return
     
-    # Запрашиваем сумму
     context.user_data["withdraw_step"] = "amount"
-    keyboard = [
-        [InlineKeyboardButton("❌ Отмена", callback_data="cancel_withdraw")]
-    ]
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_withdraw")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.message.edit_text(
@@ -435,16 +434,16 @@ async def withdraw_amount_input(update: Update, context: CallbackContext):
         
         context.user_data["withdraw_amount"] = amount
         
-        # Запрашиваем TON кошелек
+        # Запрашиваем кошелек
         context.user_data["withdraw_step"] = "wallet"
-        
         keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_withdraw")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
             f"💰 Сумма: {amount} {settings.currency_name}\n\n"
-            f"💳 Введите адрес вашего TON кошелька (USDT):\n\n"
-            f"Пример: EQB... или UQA...",
+            f"💳 **Введите номер вашего кошелька:**\n"
+            f"(QIWI, карта или крипто-кошелек)\n\n"
+            f"Пример: +7XXXXXXXXXX или карта ****",
             reply_markup=reply_markup
         )
         
@@ -455,26 +454,18 @@ async def withdraw_wallet_input(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     wallet = update.message.text.strip()
     
-    # Простая проверка TON адреса
-    if not wallet.startswith(("EQ", "UQ", "EQB", "UQA")) or len(wallet) < 30:
+    if not wallet or len(wallet) < 3:
         await update.message.reply_text(
-            "❌ Неверный формат TON кошелька!\n\n"
-            "Адрес должен начинаться с EQ, UQ, EQB или UQA\n"
-            "Пожалуйста, введите корректный адрес или отмените /cancel"
+            "❌ Введите корректный кошелек!\n"
+            "Например: +7XXXXXXXXXX или карта ****"
         )
         return
     
     amount = context.user_data.get("withdraw_amount", 0)
     if not amount:
-        await update.message.reply_text("❌ Ошибка! Попробуйте снова.")
+        await update.message.reply_text("❌ Ошибка! Попробуйте снова /withdraw")
         return
     
-    # Сохраняем TON кошелек пользователя
-    user = get_user_data(user_id)
-    user["ton_wallet"] = wallet
-    db.save()
-    
-    # Создаем заявку на вывод
     commission = int(amount * settings.withdraw_commission)
     final_amount = amount - commission
     
@@ -483,7 +474,6 @@ async def withdraw_wallet_input(update: Update, context: CallbackContext):
         "amount": amount,
         "commission": commission,
         "final_amount": final_amount,
-        "method": "TON Wallet",
         "wallet": wallet,
         "status": "pending",
         "created_at": datetime.now().isoformat(),
@@ -493,7 +483,7 @@ async def withdraw_wallet_input(update: Update, context: CallbackContext):
         }
     }
     
-    remove_mcoins(user_id, amount, f"withdraw_request_ton")
+    remove_mcoins(user_id, amount, f"withdraw_request_{wallet[:10]}")
     db.save()
     
     await update.message.reply_text(
@@ -501,15 +491,13 @@ async def withdraw_wallet_input(update: Update, context: CallbackContext):
         f"💰 Сумма: {amount} {settings.currency_name}\n"
         f"💳 Комиссия: {commission} {settings.currency_name}\n"
         f"💳 К получению: {final_amount} {settings.currency_name}\n"
-        f"💳 Кошелек: `{wallet}`\n"
-        f"💳 Способ: TON Wallet\n\n"
+        f"💳 Кошелек: `{wallet}`\n\n"
         f"⏱️ Время обработки: до 24 часов\n"
         f"📊 Статус: Ожидает обработки\n\n"
         f"✨ Вы получите уведомление после обработки заявки!",
         parse_mode="Markdown"
     )
     
-    # Уведомляем админа
     for admin_id in settings.admin_list:
         try:
             await context.bot.send_message(
@@ -520,7 +508,6 @@ async def withdraw_wallet_input(update: Update, context: CallbackContext):
                 f"💰 Сумма: {amount} {settings.currency_name}\n"
                 f"💳 К получению: {final_amount} {settings.currency_name}\n"
                 f"💳 Кошелек: `{wallet}`\n"
-                f"💳 Способ: TON Wallet\n"
                 f"📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
                 f"Обработайте заявку в админ-панели!",
                 parse_mode="Markdown"
@@ -548,10 +535,10 @@ async def withdraw_history_callback(update: Update, context: CallbackContext):
     history_text = "📊 **История выводов**\n\n"
     for i, req in enumerate(reversed(user_requests[-10:]), 1):
         status_emoji = "✅" if req["status"] == "completed" else "⏳" if req["status"] == "pending" else "❌"
-        wallet = req.get("wallet", "Не указан")[:8] + "..."
+        wallet_short = req.get("wallet", "Не указан")[:15] + "..."
         history_text += (
-            f"{i}. {status_emoji} {req['amount']} {settings.currency_name} -> TON\n"
-            f"   Кошелек: `{wallet}`\n"
+            f"{i}. {status_emoji} {req['amount']} {settings.currency_name}\n"
+            f"   💳 {wallet_short}\n"
             f"   Статус: {req['status']}\n"
             f"   Дата: {req['created_at'][:10]}\n\n"
         )
@@ -559,7 +546,7 @@ async def withdraw_history_callback(update: Update, context: CallbackContext):
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.message.edit_text(history_text, reply_markup=reply_markup, parse_mode="Markdown")
+    await query.message.edit_text(history_text, reply_markup=reply_markup)
 
 async def withdraw_info_callback(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -570,16 +557,19 @@ async def withdraw_info_callback(update: Update, context: CallbackContext):
     
     await query.message.edit_text(
         f"ℹ️ **Информация о выводе**\n\n"
-        f"💳 **Способ вывода:** TON Wallet (USDT)\n\n"
+        f"💳 **Кошелек для вывода:**\n"
+        f"`{settings.withdraw_wallet}`\n\n"
         f"💰 **Комиссия:** {settings.withdraw_commission * 100}%\n"
         f"📉 **Минимальная сумма:** {settings.min_withdraw} {settings.currency_name}\n"
         f"📈 **Максимальная сумма:** {settings.max_withdraw} {settings.currency_name}\n\n"
         f"⏱️ **Время обработки:** до 24 часов\n\n"
         f"📌 **Важно:**\n"
-        f"• Вывод доступен только на TON кошелек\n"
-        f"• Убедитесь что адрес корректен\n"
+        f"• Вывод доступен только после выполнения заданий\n"
+        f"• Укажите корректный кошелек для получения средств\n"
         f"• Мошеннические действия будут заблокированы\n"
-        f"• Вопросы по выводу - администратору"
+        f"• Вопросы по выводу - администратору",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
     )
 
 async def cancel_withdraw(update: Update, context: CallbackContext):
@@ -811,7 +801,8 @@ async def tasks_mode(update: Update, context: CallbackContext):
             f"Лимит обновится завтра.\n\n"
             f"Тем временем:\n"
             f"• Приглашайте друзей 👥\n"
-            f"• Получайте ежедневный бонус 🏆"
+            f"• Получайте ежедневный бонус 🏆\n"
+            f"• Активируйте промокоды 🎫"
         )
         return
     
@@ -845,7 +836,8 @@ async def tasks_mode(update: Update, context: CallbackContext):
                 "Пожалуйста, зайдите позже.\n"
                 "В это время вы можете:\n"
                 "• Приглашать друзей 👥\n"
-                "• Получать ежедневный бонус 🏆"
+                "• Получать ежедневный бонус 🏆\n"
+                "• Активировать промокоды 🎫"
             )
             return
         
@@ -1006,29 +998,38 @@ async def skip_task_callback(update: Update, context: CallbackContext):
         await query.edit_message_text(f"❌ Ошибка: {e}")
 
 # ========== ПРОМОКОДЫ (ТОЛЬКО ДЛЯ АДМИНОВ) ==========
-async def admin_promo_menu(update: Update, context: CallbackContext):
-    """Управление промокодами (только для админов)"""
-    if update.effective_user.id not in settings.admin_list:
-        await update.message.reply_text("⛔ Только для администратора!")
-        return
+async def promo_menu(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
     
-    keyboard = [
-        [InlineKeyboardButton("➕ Создать промокод", callback_data="create_promo_code")],
-        [InlineKeyboardButton("📋 Список промокодов", callback_data="list_promo_codes")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "🎫 **Управление промокодами** 🎫\n\n"
-        f"Всего промокодов: {len(db.promo_codes)}\n\n"
-        f"Выберите действие:",
-        reply_markup=reply_markup
-    )
+    if user_id in settings.admin_list:
+        keyboard = [
+            [InlineKeyboardButton("➕ Создать промокод", callback_data="create_promo_code")],
+            [InlineKeyboardButton("📋 Список промокодов", callback_data="list_promo_codes")],
+            [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "🎫 **Управление промокодами** 🎫\n\n"
+            f"Всего промокодов: {len(db.promo_codes)}\n\n"
+            f"Выберите действие:",
+            reply_markup=reply_markup
+        )
+    else:
+        await update.message.reply_text(
+            "🎫 **Промокоды** 🎫\n\n"
+            "Промокоды создаются только администратором.\n\n"
+            "Если у вас есть промокод, обратитесь к администратору для активации.\n\n"
+            "📌 Следите за новостями и акциями!"
+        )
 
 async def create_promo_code_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
+    
+    if update.effective_user.id not in settings.admin_list:
+        await query.message.edit_text("⛔ Только для администратора!")
+        return
     
     context.user_data["promo_create_step"] = "code"
     
@@ -1120,7 +1121,8 @@ async def promo_code_create_input(update: Update, context: CallbackContext):
                 f"🎫 Код: {code}\n"
                 f"💰 Награда: {reward} {settings.currency_name}\n"
                 f"⏱️ Срок: {expiry_text}\n\n"
-                f"Отправьте код пользователям!"
+                f"Отправьте код пользователям для активации!\n"
+                f"Пользователи активируют его командой /promo_activate <код>"
             )
             
         except ValueError:
@@ -1129,6 +1131,10 @@ async def promo_code_create_input(update: Update, context: CallbackContext):
 async def list_promo_codes_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
+    
+    if update.effective_user.id not in settings.admin_list:
+        await query.message.edit_text("⛔ Только для администратора!")
+        return
     
     if not db.promo_codes:
         await query.message.edit_text("📭 Нет созданных промокодов.")
@@ -1153,18 +1159,61 @@ async def list_promo_codes_callback(update: Update, context: CallbackContext):
         text += f"   📅 Срок: {expiry[:10] if expiry != 'Бессрочно' else expiry}\n"
         text += f"   📌 {status}\n\n"
     
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_promo")]]
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="promo_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.message.edit_text(text, reply_markup=reply_markup)
 
-async def cancel_promo_create_callback(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    context.user_data.pop("promo_create_code", None)
-    context.user_data.pop("promo_create_reward", None)
-    context.user_data.pop("promo_create_step", None)
-    await query.message.edit_text("✅ Создание промокода отменено.")
+async def activate_promo_code(update: Update, context: CallbackContext):
+    """Активация промокода пользователем"""
+    user_id = update.effective_user.id
+    args = context.args
+    
+    if not args:
+        await update.message.reply_text(
+            "🎫 **Активация промокода**\n\n"
+            "Использование: /promo_activate <код>\n"
+            "Пример: /promo_activate WELCOME100"
+        )
+        return
+    
+    code = args[0].upper()
+    
+    if code not in db.promo_codes:
+        await update.message.reply_text("❌ Неверный промокод!")
+        return
+    
+    promo = db.promo_codes[code]
+    
+    if promo.get("expiry"):
+        expiry_date = datetime.fromisoformat(promo["expiry"])
+        if datetime.now() > expiry_date:
+            await update.message.reply_text("❌ Срок действия промокода истек!")
+            return
+    
+    if len(promo.get("used_by", [])) >= promo.get("max_uses", 1):
+        await update.message.reply_text("❌ Промокод уже использован максимальное количество раз!")
+        return
+    
+    if user_id in promo.get("used_by", []):
+        await update.message.reply_text("❌ Вы уже использовали этот промокод!")
+        return
+    
+    reward = promo.get("reward", 0)
+    add_mcoins(user_id, reward, f"promo_{code}", "other")
+    
+    if "used_by" not in promo:
+        promo["used_by"] = []
+    promo["used_by"].append(user_id)
+    
+    db.save()
+    
+    await update.message.reply_text(
+        f"✅ **Промокод активирован!** 🎉\n\n"
+        f"🎁 Вы получили: {reward} {settings.currency_name}\n"
+        f"💰 Ваш баланс: {format_number(get_user_data(user_id)['mcoin'])} {settings.currency_name}\n\n"
+        f"✨ Спасибо за использование бота!"
+    )
 
 # ========== СТАТИСТИКА ==========
 async def stats_menu(update: Update, context: CallbackContext):
@@ -1260,7 +1309,10 @@ async def help_menu(update: Update, context: CallbackContext):
         "Получайте бонусы за каждого реферала!\n\n"
         "**💸 Вывод средств:**\n"
         "Накопите достаточно MCoin\n"
-        "Создайте заявку на вывод на TON кошелек\n\n"
+        "Создайте заявку на вывод\n"
+        f"Кошелек для вывода: {settings.withdraw_wallet}\n\n"
+        "**🎫 Промокоды:**\n"
+        "Активируйте промокоды командой /promo_activate <код>\n\n"
         "**🏆 Ежедневный бонус:**\n"
         "Заходите каждый день\n"
         "Увеличивайте серию и бонусы!\n\n"
@@ -1374,12 +1426,6 @@ async def reward_value_input(update: Update, context: CallbackContext):
         )
     except ValueError:
         await update.message.reply_text("❌ Введите корректное число!")
-
-async def cancel_setting_callback(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    context.user_data.pop("setting_to_change", None)
-    await query.message.edit_text("✅ Отменено.")
 
 # ========== АДМИН: ОБЯЗАТЕЛЬНЫЕ ПОДПИСКИ ==========
 async def admin_forcesub_menu(update: Update, context: CallbackContext):
@@ -1660,12 +1706,6 @@ async def list_users_callback(update: Update, context: CallbackContext):
     
     await query.message.edit_text(text, reply_markup=reply_markup)
 
-async def cancel_action_callback(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    context.user_data.pop("admin_action", None)
-    await query.message.edit_text("✅ Действие отменено.")
-
 # ========== АДМИН: СТАТИСТИКА ==========
 async def admin_stats_callback(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -1721,14 +1761,14 @@ async def admin_withdrawals_callback(update: Update, context: CallbackContext):
         if req.get("status") == "pending":
             user = db.users.get(uid, {})
             name = user.get("first_name", f"User_{uid}")
-            wallet = req.get("wallet", "Не указан")[:8] + "..."
-            pending.append(f"{uid} | {name} | {req['amount']} {settings.currency_name} | TON | {wallet}")
+            wallet = req.get("wallet", "Не указан")
+            pending.append(f"{uid} | {name} | {req['amount']} {settings.currency_name} | 💳 {wallet[:15]}...")
     
     if not pending:
         await query.message.edit_text("📭 Нет заявок на вывод!")
         return
     
-    text = "💸 **Заявки на вывод (TON):**\n\n" + "\n".join(pending[:10])
+    text = "💸 **Заявки на вывод:**\n\n" + "\n".join(pending[:10])
     if len(pending) > 10:
         text += f"\n\n... и еще {len(pending) - 10}"
     
@@ -1798,14 +1838,13 @@ async def admin_withdraw_action(update: Update, context: CallbackContext):
             
             db.global_stats["total_withdrawn"] += request["final_amount"]
             
-            wallet = request.get("wallet", "Не указан")
-            
             await update.message.reply_text(
-                f"✅ Вывод подтвержден!\n"
-                f"Пользователь: {target_id}\n"
-                f"Сумма: {request['amount']} {settings.currency_name}\n"
-                f"К получению: {request['final_amount']} {settings.currency_name}\n"
-                f"Кошелек: `{wallet}`",
+                f"✅ **Вывод подтвержден!**\n\n"
+                f"👤 Пользователь: {target_id}\n"
+                f"💰 Сумма: {request['amount']} {settings.currency_name}\n"
+                f"💳 К получению: {request['final_amount']} {settings.currency_name}\n"
+                f"💳 Кошелек: `{request.get('wallet', 'Не указан')}`\n\n"
+                f"Средства будут отправлены на указанный кошелек!",
                 parse_mode="Markdown"
             )
             
@@ -1815,8 +1854,8 @@ async def admin_withdraw_action(update: Update, context: CallbackContext):
                     f"✅ **Ваша заявка на вывод подтверждена!**\n\n"
                     f"💰 Сумма: {request['amount']} {settings.currency_name}\n"
                     f"💳 К получению: {request['final_amount']} {settings.currency_name}\n"
-                    f"💳 Кошелек: `{wallet}`\n\n"
-                    f"Средства будут отправлены на ваш TON кошелек в ближайшее время!",
+                    f"💳 Кошелек: `{request.get('wallet', 'Не указан')}`\n\n"
+                    f"Средства будут отправлены в ближайшее время!",
                     parse_mode="Markdown"
                 )
             except:
@@ -1829,18 +1868,22 @@ async def admin_withdraw_action(update: Update, context: CallbackContext):
             add_mcoins(target_id, request["amount"], "withdraw_rejected", "other")
             
             await update.message.reply_text(
-                f"❌ Вывод отклонен!\n"
-                f"Пользователь: {target_id}\n"
-                f"Сумма возвращена на баланс."
+                f"❌ **Вывод отклонен!**\n\n"
+                f"👤 Пользователь: {target_id}\n"
+                f"💰 Сумма возвращена на баланс.\n"
+                f"💳 Кошелек: `{request.get('wallet', 'Не указан')}`",
+                parse_mode="Markdown"
             )
             
             try:
                 await context.bot.send_message(
                     target_id,
                     f"❌ **Ваша заявка на вывод отклонена!**\n\n"
-                    f"💰 Сумма: {request['amount']} {settings.currency_name}\n\n"
+                    f"💰 Сумма: {request['amount']} {settings.currency_name}\n"
+                    f"💳 Кошелек: `{request.get('wallet', 'Не указан')}`\n\n"
                     f"Средства возвращены на ваш баланс.\n"
-                    f"По вопросам обратитесь к администратору."
+                    f"По вопросам обратитесь к администратору.",
+                    parse_mode="Markdown"
                 )
             except:
                 pass
@@ -1929,12 +1972,16 @@ async def send_mailing_callback(update: Update, context: CallbackContext):
         f"📊 Всего пользователей: {db.global_stats['total_users']}"
     )
 
-async def cancel_mailing_callback(update: Update, context: CallbackContext):
+# ========== АДМИН: ПРОМОКОДЫ ==========
+async def admin_promo_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
-    context.user_data.pop("mailing_message", None)
-    context.user_data.pop("mailing_step", None)
-    await query.message.edit_text("✅ Рассылка отменена.")
+    
+    if update.effective_user.id not in settings.admin_list:
+        await query.message.edit_text("⛔ Только для администратора!")
+        return
+    
+    await create_promo_code_callback(update, context)
 
 # ========== АДМИН: НАСТРОЙКИ БОТА ==========
 async def admin_settings_callback(update: Update, context: CallbackContext):
@@ -1943,7 +1990,7 @@ async def admin_settings_callback(update: Update, context: CallbackContext):
     
     keyboard = [
         [InlineKeyboardButton(f"🔄 Режим обслуживания: {settings.maintenance_mode}", callback_data="toggle_maintenance")],
-        [InlineKeyboardButton(f"💱 Валюта: {settings.currency_name}", callback_data="set_currency")],
+        [InlineKeyboardButton(f"💳 Кошелек: {settings.withdraw_wallet[:15]}...", callback_data="set_wallet")],
         [InlineKeyboardButton(f"📊 Лимит задач: {settings.max_daily_tasks}", callback_data="set_max_tasks")],
         [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
     ]
@@ -1952,10 +1999,11 @@ async def admin_settings_callback(update: Update, context: CallbackContext):
     await query.message.edit_text(
         "⚙️ **Настройки бота** ⚙️\n\n"
         f"🔄 Режим обслуживания: {'Включен' if settings.maintenance_mode else 'Выключен'}\n"
-        f"💱 Валюта: {settings.currency_name}\n"
+        f"💳 Кошелек для вывода: `{settings.withdraw_wallet}`\n"
         f"📊 Лимит задач в день: {settings.max_daily_tasks}\n\n"
         f"Выберите действие:",
-        reply_markup=reply_markup
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
     )
 
 async def toggle_maintenance_callback(update: Update, context: CallbackContext):
@@ -1967,6 +2015,42 @@ async def toggle_maintenance_callback(update: Update, context: CallbackContext):
     
     status = "включен" if settings.maintenance_mode else "выключен"
     await query.message.edit_text(f"🔄 Режим обслуживания {status}!")
+
+async def set_wallet_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data["setting_to_change"] = "wallet"
+    
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_setting")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.edit_text(
+        "💳 **Настройка кошелька для вывода**\n\n"
+        "Введите новый кошелек для вывода средств:\n"
+        "Пример: +7XXXXXXXXXX или карта ****",
+        reply_markup=reply_markup
+    )
+
+async def wallet_value_input(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    if user_id not in settings.admin_list:
+        return
+    
+    wallet = update.message.text.strip()
+    if len(wallet) < 3:
+        await update.message.reply_text("❌ Введите корректный кошелек!")
+        return
+    
+    settings.withdraw_wallet = wallet
+    settings.save()
+    context.user_data.pop("setting_to_change", None)
+    
+    await update.message.reply_text(
+        f"✅ Кошелек для вывода обновлен!\n"
+        f"💳 Новый кошелек: `{wallet}`",
+        parse_mode="Markdown"
+    )
 
 # ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
 async def start(update: Update, context: CallbackContext):
@@ -2026,7 +2110,8 @@ async def start(update: Update, context: CallbackContext):
         f"• 📋 Выполнять задания и получать {settings.currency_name}\n"
         f"• 👥 Приглашать друзей и получать бонусы\n"
         f"• 🏆 Получать ежедневные бонусы\n"
-        f"• 💸 Выводить средства на TON кошелек\n\n"
+        f"• 💸 Выводить заработанные средства\n"
+        f"• 🎫 Активировать промокоды\n\n"
         f"💰 Ваш баланс: 0 {settings.currency_name}"
         f"{sub_text}"
     )
@@ -2041,8 +2126,6 @@ async def balance_handler(update: Update, context: CallbackContext):
     progress = int((current_exp / exp_needed) * 20) if exp_needed > 0 else 0
     progress_bar = "█" * progress + "░" * (20 - progress)
     
-    wallet_info = f"💳 TON кошелек: {user.get('ton_wallet', 'Не указан')}" if user.get("ton_wallet") else "💳 TON кошелек не указан"
-    
     await update.message.reply_text(
         f"💰 **Ваш баланс** 💰\n\n"
         f"🎮 {settings.currency_name}: `{format_number(user['mcoin'])}`\n\n"
@@ -2055,8 +2138,7 @@ async def balance_handler(update: Update, context: CallbackContext):
         f"✅ С заданий: {format_number(user['task_earned'])}\n"
         f"👥 С рефералов: {format_number(user['referral_earned'])}\n"
         f"📅 В боте: {(datetime.now() - datetime.fromisoformat(user['join_date'])).days} дней\n"
-        f"🔥 Серия: {user['daily_streak']} дней\n"
-        f"{wallet_info}",
+        f"🔥 Серия: {user['daily_streak']} дней",
         parse_mode="Markdown"
     )
 
@@ -2098,6 +2180,10 @@ async def handle_text(update: Update, context: CallbackContext):
         await add_force_sub_input(update, context)
         return
     
+    if context.user_data.get("setting_to_change") == "wallet":
+        await wallet_value_input(update, context)
+        return
+    
     if context.user_data.get("setting_to_change"):
         await reward_value_input(update, context)
         return
@@ -2112,6 +2198,8 @@ async def handle_text(update: Update, context: CallbackContext):
         await daily_bonus(update, context)
     elif text == "💸 Вывод средств":
         await withdraw_menu(update, context)
+    elif text == "🎫 Промокоды":
+        await promo_menu(update, context)
     elif text == "📊 Статистика":
         await stats_menu(update, context)
     elif text == "❓ Помощь":
@@ -2125,6 +2213,34 @@ async def handle_text(update: Update, context: CallbackContext):
             reply_markup=get_main_keyboard(user_id)
         )
 
+# ========== ОБРАБОТЧИКИ ОТМЕНЫ ==========
+async def cancel_action_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("admin_action", None)
+    await query.message.edit_text("✅ Действие отменено.")
+
+async def cancel_setting_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("setting_to_change", None)
+    await query.message.edit_text("✅ Отменено.")
+
+async def cancel_mailing_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("mailing_message", None)
+    context.user_data.pop("mailing_step", None)
+    await query.message.edit_text("✅ Рассылка отменена.")
+
+async def cancel_promo_create_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("promo_create_code", None)
+    context.user_data.pop("promo_create_reward", None)
+    context.user_data.pop("promo_create_step", None)
+    await query.message.edit_text("✅ Создание промокода отменено.")
+
 # ========== ЗАПУСК БОТА ==========
 def main():
     db.load()
@@ -2135,6 +2251,7 @@ def main():
     # Команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("tasks", tasks_mode))
+    app.add_handler(CommandHandler("promo_activate", activate_promo_code))
     app.add_handler(CommandHandler("balance", balance_handler))
     
     # Callback обработчики - ЗАДАНИЯ
@@ -2160,11 +2277,12 @@ def main():
     app.add_handler(CallbackQueryHandler(reject_withdraw_callback, pattern="^reject_withdraw$"))
     app.add_handler(CallbackQueryHandler(admin_mailing_callback, pattern="^admin_mailing$"))
     app.add_handler(CallbackQueryHandler(send_mailing_callback, pattern="^send_mailing$"))
-    app.add_handler(CallbackQueryHandler(admin_promo_menu, pattern="^admin_promo$"))
+    app.add_handler(CallbackQueryHandler(admin_promo_callback, pattern="^admin_promo$"))
     app.add_handler(CallbackQueryHandler(create_promo_code_callback, pattern="^create_promo_code$"))
     app.add_handler(CallbackQueryHandler(list_promo_codes_callback, pattern="^list_promo_codes$"))
     app.add_handler(CallbackQueryHandler(admin_settings_callback, pattern="^admin_settings$"))
     app.add_handler(CallbackQueryHandler(toggle_maintenance_callback, pattern="^toggle_maintenance$"))
+    app.add_handler(CallbackQueryHandler(set_wallet_callback, pattern="^set_wallet$"))
     
     # Callback обработчики - РЕФЕРАЛЫ
     app.add_handler(CallbackQueryHandler(referrals_menu, pattern="^referrals_menu$"))
@@ -2178,6 +2296,9 @@ def main():
     app.add_handler(CallbackQueryHandler(withdraw_history_callback, pattern="^withdraw_history$"))
     app.add_handler(CallbackQueryHandler(withdraw_info_callback, pattern="^withdraw_info$"))
     app.add_handler(CallbackQueryHandler(cancel_withdraw, pattern="^cancel_withdraw$"))
+    
+    # Callback обработчики - ПРОМОКОДЫ
+    app.add_handler(CallbackQueryHandler(promo_menu, pattern="^promo_menu$"))
     
     # Callback обработчики - СТАТИСТИКА
     app.add_handler(CallbackQueryHandler(stats_menu, pattern="^stats_menu$"))
@@ -2200,7 +2321,7 @@ def main():
     print(f"📊 Администратор: {ADMIN_ID}")
     print(f"💎 Название: {settings.bot_name}")
     print(f"👥 Пользователей: {db.global_stats['total_users']}")
-    print(f"💳 Способ вывода: TON Wallet")
+    print(f"💳 Кошелек для вывода: {settings.withdraw_wallet}")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
