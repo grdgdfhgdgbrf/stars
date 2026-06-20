@@ -44,7 +44,7 @@ ADMIN_ID = 5356400377
 # Состояния для ConversationHandler
 (AWAITING_WITHDRAW_AMOUNT, AWAITING_WITHDRAW_CONFIRM, AWAITING_BAN_USERNAME,
  AWAITING_UNBAN_USERNAME, AWAITING_ADD_MCOIN_USERNAME, MAILING_TEXT, 
- AWAITING_SETTING_VALUE, AWAITING_FORCE_SUB_INPUT) = range(8)
+ AWAITING_SETTING_VALUE, AWAITING_FORCE_SUB_INPUT, AWAITING_WITHDRAW_USERNAME) = range(9)
 
 # Файлы для хранения данных
 DATA_FILE = "bot_data.json"
@@ -198,6 +198,9 @@ def get_user_by_username(username: str) -> Optional[int]:
         if data.get("username") and data["username"].lower() == username:
             return user_id
     return None
+
+def get_user_by_id(user_id: int) -> Optional[Dict]:
+    return db.users.get(user_id)
 
 def add_mcoins(user_id: int, amount: int, reason: str = "", source: str = "other") -> bool:
     if amount <= 0:
@@ -467,9 +470,8 @@ async def show_task(update: Update, context: CallbackContext, task: Dict, user_i
         msg = await update.message.reply_text("🔄 Загружаем задание...")
     
     task_url = task.get("link", "")
-    task_price = settings.task_reward  # Единая цена из настроек
+    task_price = settings.task_reward
     
-    # Сохраняем текущее задание
     db.current_task[user_id] = task
     
     keyboard = [
@@ -514,7 +516,7 @@ async def check_task_callback(update: Update, context: CallbackContext):
     task = db.current_task[user_id]
     task_source = task.get("source", "unknown")
     task_url = task.get("link", "")
-    task_price = settings.task_reward  # Единая цена из настроек
+    task_price = settings.task_reward
     
     await query.message.edit_text("🔍 **Проверяем выполнение задания...**\n\nПожалуйста, подождите...")
     
@@ -524,7 +526,6 @@ async def check_task_callback(update: Update, context: CallbackContext):
         if task_source == "botohub":
             result = await call_botohub_api(user_id, is_task=True, skip=False)
             prev_success = result.get("prev_success", False)
-            completed = result.get("completed", False)
             
             if prev_success:
                 task_completed = True
@@ -538,19 +539,15 @@ async def check_task_callback(update: Update, context: CallbackContext):
                     task_completed = True
         
         if task_completed:
-            # Начисляем деньги ТОЛЬКО после успешного выполнения
             add_mcoins(user_id, task_price, f"task_{task_url}", "task")
             user = get_user_data(user_id)
             user["tasks_today"] += 1
             
-            # Сохраняем ссылку как выполненную
             if "completed_links" not in user:
                 user["completed_links"] = []
             user["completed_links"].append(task_url)
             
             db.save()
-            
-            # Удаляем текущее задание
             db.current_task.pop(user_id, None)
             
             await query.message.edit_text(
@@ -608,7 +605,6 @@ async def skip_task_callback(update: Update, context: CallbackContext):
     if user_id in db.current_task:
         task = db.current_task[user_id]
         
-        # Пропускаем через API
         try:
             if task.get("source") == "botohub":
                 await call_botohub_api(user_id, is_task=True, skip=True)
@@ -632,7 +628,6 @@ async def next_task_callback(update: Update, context: CallbackContext):
     await query.answer()
     user_id = query.from_user.id
     
-    # Проверяем лимит заданий
     user = get_user_data(user_id)
     today = datetime.now().date().isoformat()
     
@@ -651,7 +646,6 @@ async def next_task_callback(update: Update, context: CallbackContext):
     
     await query.message.edit_text("🔄 Получаем новое задание...")
     
-    # Пробуем получить задание из BotoHub
     botohub_task = None
     piarflow_task = None
     
@@ -662,11 +656,8 @@ async def next_task_callback(update: Update, context: CallbackContext):
         skip_flag = result.get("skip", False)
         
         if not completed and not skip_flag and tasks:
-            # Проверяем не выполнял ли уже это задание пользователь
             if "completed_links" in user and tasks[0] in user["completed_links"]:
-                # Пропускаем уже выполненное задание
                 await call_botohub_api(user_id, is_task=True, skip=True)
-                # Пробуем получить следующее
                 result2 = await call_botohub_api(user_id, is_task=True, skip=False)
                 tasks2 = result2.get("tasks", [])
                 if tasks2 and tasks2[0] not in user.get("completed_links", []):
@@ -682,13 +673,11 @@ async def next_task_callback(update: Update, context: CallbackContext):
     except Exception as e:
         logger.error(f"Ошибка BotoHub: {e}")
     
-    # Если нет задания из BotoHub, пробуем PiarFlow
     if not botohub_task:
         try:
             piarflow_tasks, msg_pf = await get_piarflow_tasks(user_id, query.message.chat.id)
             if piarflow_tasks:
                 link = piarflow_tasks[0].get("link", "")
-                # Проверяем не выполнял ли уже
                 if "completed_links" in user and link not in user["completed_links"]:
                     piarflow_task = {
                         "link": link,
@@ -698,7 +687,6 @@ async def next_task_callback(update: Update, context: CallbackContext):
         except Exception as e:
             logger.error(f"Ошибка PiarFlow: {e}")
     
-    # Выбираем задание
     if botohub_task:
         task = botohub_task
         db.current_task[user_id] = task
@@ -1227,7 +1215,10 @@ async def detailed_stats_callback(update: Update, context: CallbackContext):
     user_id = query.from_user.id
     user = get_user_data(user_id)
     
-    completed_withdrawals = len([r for r in db.withdraw_requests.values() if r.get("status") == "completed" and r.get("user_id") == user_id])
+    completed_withdrawals = 0
+    for uid, req in db.withdraw_requests.items():
+        if uid == user_id and req.get("status") == "completed":
+            completed_withdrawals += 1
     
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="stats_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1316,7 +1307,11 @@ async def admin_panel(update: Update, context: CallbackContext):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    pending_withdrawals = len([r for r in db.withdraw_requests.values() if r.get("status") == "pending"])
+    pending_withdrawals = 0
+    for uid, req in db.withdraw_requests.items():
+        if req.get("status") == "pending":
+            pending_withdrawals += 1
+    
     total_users = db.global_stats["total_users"]
     
     await update.message.reply_text(
@@ -1363,7 +1358,6 @@ async def set_reward_value(update: Update, context: CallbackContext):
     keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_setting")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # Определяем название настройки для отображения
     setting_names = {
         "task_reward": "награды за задание",
         "ref_reward": "награды за реферала",
@@ -1397,7 +1391,6 @@ async def reward_value_input(update: Update, context: CallbackContext):
             await update.message.reply_text("❌ Значение должно быть положительным!")
             return
         
-        # Обновляем настройку
         if setting == "task_reward":
             settings.task_reward = value
             await update.message.reply_text(
@@ -1754,7 +1747,11 @@ async def admin_stats_callback(update: Update, context: CallbackContext):
     total_withdrawn = db.global_stats["total_withdrawn"]
     total_tasks = db.global_stats["total_tasks_completed"]
     
-    pending_withdrawals = len([r for r in db.withdraw_requests.values() if r.get("status") == "pending"])
+    pending_withdrawals = 0
+    for uid, req in db.withdraw_requests.items():
+        if req.get("status") == "pending":
+            pending_withdrawals += 1
+    
     total_withdraw_requests = len(db.withdraw_requests)
     
     active_users = 0
@@ -1795,32 +1792,32 @@ async def admin_withdrawals_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
     
-    pending = []
+    pending_list = []
     for uid, req in db.withdraw_requests.items():
         if req.get("status") == "pending":
             user = db.users.get(uid, {})
             name = user.get("first_name", f"User_{uid}")
             username = req.get("username", "Не указан")
-            pending.append(f"{uid} | @{username} | {req['amount']} {settings.currency_name}")
+            pending_list.append(f"{uid} | @{username} | {req['amount']} {settings.currency_name}")
     
-    if not pending:
+    if not pending_list:
         await query.message.edit_text("📭 Нет заявок на вывод!")
         return
     
-    text = "💸 **Заявки на вывод:**\n\n" + "\n".join(pending[:10])
-    if len(pending) > 10:
-        text += f"\n\n... и еще {len(pending) - 10}"
+    text = "💸 **Заявки на вывод:**\n\n" + "\n".join(pending_list[:10])
+    if len(pending_list) > 10:
+        text += f"\n\n... и еще {len(pending_list) - 10}"
     
     keyboard = [
-        [InlineKeyboardButton("✅ Подтвердить вывод", callback_data="confirm_withdraw")],
-        [InlineKeyboardButton("❌ Отклонить вывод", callback_data="reject_withdraw")],
+        [InlineKeyboardButton("✅ Подтвердить вывод", callback_data="confirm_withdraw_admin")],
+        [InlineKeyboardButton("❌ Отклонить вывод", callback_data="reject_withdraw_admin")],
         [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.message.edit_text(text, reply_markup=reply_markup)
 
-async def confirm_withdraw_callback(update: Update, context: CallbackContext):
+async def confirm_withdraw_admin_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
     
@@ -1831,11 +1828,11 @@ async def confirm_withdraw_callback(update: Update, context: CallbackContext):
     
     await query.message.edit_text(
         "✅ **Подтверждение вывода**\n\n"
-        "Введите @username пользователя для подтверждения вывода:",
+        "Введите ID пользователя для подтверждения вывода:",
         reply_markup=reply_markup
     )
 
-async def reject_withdraw_callback(update: Update, context: CallbackContext):
+async def reject_withdraw_admin_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
     
@@ -1846,11 +1843,11 @@ async def reject_withdraw_callback(update: Update, context: CallbackContext):
     
     await query.message.edit_text(
         "❌ **Отклонение вывода**\n\n"
-        "Введите @username пользователя для отклонения вывода:",
+        "Введите ID пользователя для отклонения вывода:",
         reply_markup=reply_markup
     )
 
-async def admin_withdraw_action(update: Update, context: CallbackContext):
+async def admin_withdraw_action_input(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     if user_id not in settings.admin_list:
         return
@@ -1860,14 +1857,7 @@ async def admin_withdraw_action(update: Update, context: CallbackContext):
         return
     
     try:
-        username = update.message.text.strip()
-        if username.startswith("@"):
-            username = username[1:]
-        
-        target_id = get_user_by_username(username)
-        if not target_id:
-            await update.message.reply_text(f"❌ Пользователь @{username} не найден!")
-            return
+        target_id = int(update.message.text.strip())
         
         if target_id not in db.withdraw_requests:
             await update.message.reply_text("❌ Заявка не найдена!")
@@ -1882,53 +1872,59 @@ async def admin_withdraw_action(update: Update, context: CallbackContext):
             request["status"] = "completed"
             request["completed_at"] = datetime.now().isoformat()
             
-            db.global_stats["total_withdrawn"] += request["final_amount"]
+            db.global_stats["total_withdrawn"] += request.get("final_amount", request.get("amount", 0))
+            db.save()
             
-            await update.message.reply_text(
-                f"✅ Вывод подтвержден!\n"
-                f"Пользователь: @{username}\n"
-                f"Сумма: {request['amount']} {settings.currency_name}\n"
-                f"К получению: {request['final_amount']} {settings.currency_name}"
-            )
-            
+            # Уведомляем пользователя
             try:
                 await context.bot.send_message(
                     target_id,
                     f"✅ **Ваша заявка на вывод подтверждена!**\n\n"
                     f"💰 Сумма: {request['amount']} {settings.currency_name}\n"
-                    f"💳 К получению: {request['final_amount']} {settings.currency_name}\n"
-                    f"👤 Username: @{username}\n\n"
+                    f"💳 К получению: {request.get('final_amount', request['amount'])} {settings.currency_name}\n"
+                    f"👤 Username: @{request.get('username', 'Не указан')}\n\n"
                     f"Средства будут отправлены в ближайшее время!"
                 )
             except:
                 pass
+            
+            await update.message.reply_text(
+                f"✅ Вывод подтвержден!\n"
+                f"Пользователь ID: {target_id}\n"
+                f"Сумма: {request['amount']} {settings.currency_name}\n"
+                f"К получению: {request.get('final_amount', request['amount'])} {settings.currency_name}"
+            )
                 
         else:
             request["status"] = "rejected"
             request["rejected_at"] = datetime.now().isoformat()
             
+            # Возвращаем деньги
             add_mcoins(target_id, request["amount"], "withdraw_rejected", "other")
             
-            await update.message.reply_text(
-                f"❌ Вывод отклонен!\n"
-                f"Пользователь: @{username}\n"
-                f"Сумма возвращена на баланс."
-            )
-            
+            # Уведомляем пользователя
             try:
                 await context.bot.send_message(
                     target_id,
                     f"❌ **Ваша заявка на вывод отклонена!**\n\n"
                     f"💰 Сумма: {request['amount']} {settings.currency_name}\n"
-                    f"👤 Username: @{username}\n\n"
+                    f"👤 Username: @{request.get('username', 'Не указан')}\n\n"
                     f"Средства возвращены на ваш баланс.\n"
                     f"По вопросам обратитесь к администратору."
                 )
             except:
                 pass
+            
+            await update.message.reply_text(
+                f"❌ Вывод отклонен!\n"
+                f"Пользователь ID: {target_id}\n"
+                f"Сумма возвращена на баланс."
+            )
         
         db.save()
         
+    except ValueError:
+        await update.message.reply_text("❌ Введите корректный ID пользователя!")
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {e}")
     
@@ -2250,8 +2246,8 @@ def main():
     app.add_handler(CallbackQueryHandler(list_users_callback, pattern="^list_users$"))
     app.add_handler(CallbackQueryHandler(admin_stats_callback, pattern="^admin_stats$"))
     app.add_handler(CallbackQueryHandler(admin_withdrawals_callback, pattern="^admin_withdrawals$"))
-    app.add_handler(CallbackQueryHandler(confirm_withdraw_callback, pattern="^confirm_withdraw$"))
-    app.add_handler(CallbackQueryHandler(reject_withdraw_callback, pattern="^reject_withdraw$"))
+    app.add_handler(CallbackQueryHandler(confirm_withdraw_admin_callback, pattern="^confirm_withdraw_admin$"))
+    app.add_handler(CallbackQueryHandler(reject_withdraw_admin_callback, pattern="^reject_withdraw_admin$"))
     app.add_handler(CallbackQueryHandler(admin_mailing_callback, pattern="^admin_mailing$"))
     app.add_handler(CallbackQueryHandler(send_mailing_callback, pattern="^send_mailing$"))
     app.add_handler(CallbackQueryHandler(admin_settings_callback, pattern="^admin_settings$"))
