@@ -67,6 +67,7 @@ class BotDatabase:
         self.pending_checks: Dict[int, Dict] = {}
         self.current_task: Dict[int, Dict] = {}
         self.task_queue: Dict[int, List[Dict]] = {}
+        self.completed_tasks: Dict[int, List[str]] = {}
         
     def save(self):
         data = {
@@ -77,7 +78,8 @@ class BotDatabase:
             "global_stats": self.global_stats,
             "pending_checks": self.pending_checks,
             "current_task": self.current_task,
-            "task_queue": self.task_queue
+            "task_queue": self.task_queue,
+            "completed_tasks": self.completed_tasks
         }
         try:
             with open(DATA_FILE, 'w', encoding='utf-8') as f:
@@ -99,6 +101,7 @@ class BotDatabase:
                     self.pending_checks = {int(k): v for k, v in data.get("pending_checks", {}).items()}
                     self.current_task = {int(k): v for k, v in data.get("current_task", {}).items()}
                     self.task_queue = {int(k): v for k, v in data.get("task_queue", {}).items()}
+                    self.completed_tasks = {int(k): v for k, v in data.get("completed_tasks", {}).items()}
                 logger.info("Данные загружены")
             except Exception as e:
                 logger.error(f"Ошибка загрузки данных: {e}")
@@ -179,7 +182,8 @@ def get_user_data(user_id: int) -> Dict:
             "task_earned": 0,
             "bonus_claims": 0,
             "last_withdraw_date": None,
-            "total_tasks_completed": 0
+            "total_tasks_completed": 0,
+            "completed_links": []
         }
         db.global_stats["total_users"] += 1
         db.save()
@@ -379,6 +383,7 @@ async def tasks_mode(update: Update, context: CallbackContext):
     if user.get("last_task_date") != today:
         user["tasks_today"] = 0
         user["last_task_date"] = today
+        db.save()
     
     if user["tasks_today"] >= settings.max_daily_tasks:
         await update.message.reply_text(
@@ -391,9 +396,9 @@ async def tasks_mode(update: Update, context: CallbackContext):
         )
         return
     
-    # Проверяем есть ли задание в очереди
-    if user_id in db.task_queue and db.task_queue[user_id]:
-        task = db.task_queue[user_id].pop(0)
+    # Проверяем есть ли уже активное задание
+    if user_id in db.current_task:
+        task = db.current_task[user_id]
         await show_task(update, context, task, user_id)
         return
     
@@ -407,8 +412,9 @@ async def tasks_mode(update: Update, context: CallbackContext):
         result = await call_botohub_api(user_id, is_task=True, skip=False)
         tasks = result.get("tasks", [])
         completed = result.get("completed", False)
+        skip_flag = result.get("skip", False)
         
-        if not completed and tasks:
+        if not completed and not skip_flag and tasks:
             botohub_task = {
                 "link": tasks[0],
                 "price": settings.task_reward,
@@ -436,8 +442,12 @@ async def tasks_mode(update: Update, context: CallbackContext):
     # Выбираем задание
     if botohub_task:
         task = botohub_task
+        db.current_task[user_id] = task
+        await show_task(update, context, task, user_id)
     elif piarflow_task:
         task = piarflow_task
+        db.current_task[user_id] = task
+        await show_task(update, context, task, user_id)
     else:
         await msg.edit_text(
             "🎉 **Нет активных заданий!**\n\n"
@@ -446,9 +456,6 @@ async def tasks_mode(update: Update, context: CallbackContext):
             "• Приглашать друзей 👥\n"
             "• Получать ежедневный бонус 🏆"
         )
-        return
-    
-    await show_task(update, context, task, user_id)
 
 async def show_task(update: Update, context: CallbackContext, task: Dict, user_id: int):
     """Показывает одно задание"""
@@ -465,7 +472,6 @@ async def show_task(update: Update, context: CallbackContext, task: Dict, user_i
     
     task_url = task.get("link", "")
     task_price = task.get("price", settings.task_reward)
-    task_source = task.get("source", "unknown")
     
     # Сохраняем текущее задание
     db.current_task[user_id] = task
@@ -517,104 +523,70 @@ async def check_task_callback(update: Update, context: CallbackContext):
     await query.message.edit_text("🔍 **Проверяем выполнение задания...**\n\nПожалуйста, подождите...")
     
     try:
+        task_completed = False
+        
         if task_source == "botohub":
             result = await call_botohub_api(user_id, is_task=True, skip=False)
             prev_success = result.get("prev_success", False)
             completed = result.get("completed", False)
             
             if prev_success:
-                add_mcoins(user_id, task_price, f"botohub_task_{task_url}", "task")
-                user = get_user_data(user_id)
-                user["tasks_today"] += 1
-                db.save()
-                
-                # Удаляем текущее задание
-                db.current_task.pop(user_id, None)
-                
-                await query.message.edit_text(
-                    f"✅ **Задание выполнено!** ✅\n\n"
-                    f"💰 Вы получили: {task_price} {settings.currency_name}\n"
-                    f"📊 Сегодня выполнено: {user['tasks_today']}/{settings.max_daily_tasks}\n"
-                    f"💰 Ваш баланс: {format_number(user['mcoin'])} {settings.currency_name}\n\n"
-                    f"Хотите получить следующее задание?",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📋 Следующее задание", callback_data="next_task")],
-                        [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
-                    ])
-                )
-            else:
-                await query.message.edit_text(
-                    f"❌ **Вы ещё не выполнили задание!** ❌\n\n"
-                    f"🔗 Пожалуйста, подпишитесь:\n{task_url}\n\n"
-                    f"**Инструкция:**\n"
-                    f"1️⃣ Нажмите на ссылку выше\n"
-                    f"2️⃣ Нажмите «Подписаться» или «Join»\n"
-                    f"3️⃣ Вернитесь и нажмите «Проверить выполнение»\n\n"
-                    f"⏱️ У вас есть 3 минуты на выполнение",
-                    disable_web_page_preview=True
-                )
-                
-                keyboard = [
-                    [InlineKeyboardButton("📎 Перейти к заданию", url=task_url)],
-                    [InlineKeyboardButton("✅ Проверить выполнение", callback_data=f"check_task_{user_id}")],
-                    [InlineKeyboardButton("⏩ Пропустить", callback_data=f"skip_task_{user_id}")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                await query.edit_message_reply_markup(reply_markup)
+                task_completed = True
                 
         elif task_source == "piarflow":
             check_result, msg = await check_piarflow_tasks(user_id, [task_url])
             
             if check_result:
                 all_subscribed = all(item.get("status") == "subscribed" for item in check_result)
-                
                 if all_subscribed:
-                    add_mcoins(user_id, task_price, f"piarflow_task_{task_url}", "task")
-                    user = get_user_data(user_id)
-                    user["tasks_today"] += 1
-                    db.save()
-                    
-                    db.current_task.pop(user_id, None)
-                    
-                    await query.message.edit_text(
-                        f"✅ **Задание выполнено!** ✅\n\n"
-                        f"💰 Вы получили: {task_price} {settings.currency_name}\n"
-                        f"📊 Сегодня выполнено: {user['tasks_today']}/{settings.max_daily_tasks}\n"
-                        f"💰 Ваш баланс: {format_number(user['mcoin'])} {settings.currency_name}\n\n"
-                        f"Хотите получить следующее задание?",
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("📋 Следующее задание", callback_data="next_task")],
-                            [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
-                        ])
-                    )
-                else:
-                    await query.message.edit_text(
-                        f"❌ **Вы ещё не выполнили задание!** ❌\n\n"
-                        f"🔗 Пожалуйста, подпишитесь:\n{task_url}\n\n"
-                        f"**Инструкция:**\n"
-                        f"1️⃣ Нажмите на ссылку выше\n"
-                        f"2️⃣ Нажмите «Подписаться» или «Join»\n"
-                        f"3️⃣ Вернитесь и нажмите «Проверить выполнение»\n\n"
-                        f"⏱️ У вас есть 3 минуты на выполнение",
-                        disable_web_page_preview=True
-                    )
-                    
-                    keyboard = [
-                        [InlineKeyboardButton("📎 Перейти к заданию", url=task_url)],
-                        [InlineKeyboardButton("✅ Проверить выполнение", callback_data=f"check_task_{user_id}")],
-                        [InlineKeyboardButton("⏩ Пропустить", callback_data=f"skip_task_{user_id}")]
-                    ]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    await query.edit_message_reply_markup(reply_markup)
-            else:
-                await query.message.edit_text(
-                    f"❌ **Ошибка проверки:** {msg}\n\n"
-                    f"Попробуйте позже или перейдите к следующему заданию.",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("⏩ Следующее задание", callback_data="next_task")],
-                        [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
-                    ])
-                )
+                    task_completed = True
+        
+        if task_completed:
+            # Начисляем деньги ТОЛЬКО после успешного выполнения
+            add_mcoins(user_id, task_price, f"task_{task_url}", "task")
+            user = get_user_data(user_id)
+            user["tasks_today"] += 1
+            
+            # Сохраняем ссылку как выполненную
+            if "completed_links" not in user:
+                user["completed_links"] = []
+            user["completed_links"].append(task_url)
+            
+            db.save()
+            
+            # Удаляем текущее задание
+            db.current_task.pop(user_id, None)
+            
+            await query.message.edit_text(
+                f"✅ **Задание выполнено!** ✅\n\n"
+                f"💰 Вы получили: {task_price} {settings.currency_name}\n"
+                f"📊 Сегодня выполнено: {user['tasks_today']}/{settings.max_daily_tasks}\n"
+                f"💰 Ваш баланс: {format_number(user['mcoin'])} {settings.currency_name}\n\n"
+                f"Хотите получить следующее задание?",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📋 Следующее задание", callback_data="next_task")],
+                    [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
+                ])
+            )
+        else:
+            await query.message.edit_text(
+                f"❌ **Вы ещё не выполнили задание!** ❌\n\n"
+                f"🔗 Пожалуйста, подпишитесь:\n{task_url}\n\n"
+                f"**Инструкция:**\n"
+                f"1️⃣ Нажмите на ссылку выше\n"
+                f"2️⃣ Нажмите «Подписаться» или «Join»\n"
+                f"3️⃣ Вернитесь и нажмите «Проверить выполнение»\n\n"
+                f"⏱️ У вас есть 3 минуты на выполнение",
+                disable_web_page_preview=True
+            )
+            
+            keyboard = [
+                [InlineKeyboardButton("📎 Перейти к заданию", url=task_url)],
+                [InlineKeyboardButton("✅ Проверить выполнение", callback_data=f"check_task_{user_id}")],
+                [InlineKeyboardButton("⏩ Пропустить", callback_data=f"skip_task_{user_id}")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_reply_markup(reply_markup)
                 
     except Exception as e:
         logger.error(f"Ошибка проверки задания: {e}")
@@ -644,9 +616,6 @@ async def skip_task_callback(update: Update, context: CallbackContext):
         try:
             if task.get("source") == "botohub":
                 await call_botohub_api(user_id, is_task=True, skip=True)
-            elif task.get("source") == "piarflow":
-                # Для PiarFlow просто удаляем задание
-                pass
         except Exception as e:
             logger.error(f"Ошибка пропуска задания: {e}")
         
@@ -667,9 +636,102 @@ async def next_task_callback(update: Update, context: CallbackContext):
     await query.answer()
     user_id = query.from_user.id
     
-    await query.message.edit_text("🔄 Получаем следующее задание...")
+    # Проверяем лимит заданий
+    user = get_user_data(user_id)
+    today = datetime.now().date().isoformat()
     
-    await tasks_mode(update, context)
+    if user.get("last_task_date") != today:
+        user["tasks_today"] = 0
+        user["last_task_date"] = today
+        db.save()
+    
+    if user["tasks_today"] >= settings.max_daily_tasks:
+        await query.message.edit_text(
+            f"⏰ **Дневной лимит заданий исчерпан!**\n\n"
+            f"Вы выполнили {settings.max_daily_tasks} заданий сегодня.\n"
+            f"Лимит обновится завтра."
+        )
+        return
+    
+    # Проверяем есть ли задание в очереди
+    if user_id in db.task_queue and db.task_queue[user_id]:
+        task = db.task_queue[user_id].pop(0)
+        db.current_task[user_id] = task
+        await show_task(update, context, task, user_id)
+        return
+    
+    await query.message.edit_text("🔄 Получаем новое задание...")
+    
+    # Пробуем получить задание из BotoHub
+    botohub_task = None
+    piarflow_task = None
+    
+    try:
+        result = await call_botohub_api(user_id, is_task=True, skip=False)
+        tasks = result.get("tasks", [])
+        completed = result.get("completed", False)
+        skip_flag = result.get("skip", False)
+        
+        if not completed and not skip_flag and tasks:
+            # Проверяем не выполнял ли уже это задание пользователь
+            if "completed_links" in user and tasks[0] in user["completed_links"]:
+                # Пропускаем уже выполненное задание
+                await call_botohub_api(user_id, is_task=True, skip=True)
+                # Пробуем получить следующее
+                result2 = await call_botohub_api(user_id, is_task=True, skip=False)
+                tasks2 = result2.get("tasks", [])
+                if tasks2 and tasks2[0] not in user.get("completed_links", []):
+                    botohub_task = {
+                        "link": tasks2[0],
+                        "price": settings.task_reward,
+                        "source": "botohub",
+                        "type": "BotoHub"
+                    }
+            else:
+                botohub_task = {
+                    "link": tasks[0],
+                    "price": settings.task_reward,
+                    "source": "botohub",
+                    "type": "BotoHub"
+                }
+    except Exception as e:
+        logger.error(f"Ошибка BotoHub: {e}")
+    
+    # Если нет задания из BotoHub, пробуем PiarFlow
+    if not botohub_task:
+        try:
+            piarflow_tasks, msg_pf = await get_piarflow_tasks(user_id, query.message.chat.id)
+            if piarflow_tasks:
+                link = piarflow_tasks[0].get("link", "")
+                # Проверяем не выполнял ли уже
+                if "completed_links" in user and link not in user["completed_links"]:
+                    piarflow_task = {
+                        "link": link,
+                        "price": piarflow_tasks[0].get("price", settings.task_reward),
+                        "source": "piarflow",
+                        "type": "PiarFlow",
+                        "original": piarflow_tasks[0]
+                    }
+        except Exception as e:
+            logger.error(f"Ошибка PiarFlow: {e}")
+    
+    # Выбираем задание
+    if botohub_task:
+        task = botohub_task
+        db.current_task[user_id] = task
+        await show_task(update, context, task, user_id)
+    elif piarflow_task:
+        task = piarflow_task
+        db.current_task[user_id] = task
+        await show_task(update, context, task, user_id)
+    else:
+        await query.message.edit_text(
+            "🎉 **Нет активных заданий!**\n\n"
+            "Пожалуйста, зайдите позже.\n"
+            "В это время вы можете:\n"
+            "• Приглашать друзей 👥\n"
+            "• Получать ежедневный бонус 🏆"
+        )
 
 # ========== ВЫВОД СРЕДСТВ ==========
 async def withdraw_menu(update: Update, context: CallbackContext):
@@ -2211,6 +2273,7 @@ def main():
     print(f"👥 Пользователей: {db.global_stats['total_users']}")
     print(f"👤 Вывод на Telegram username")
     print(f"📋 Задания выдаются по одному")
+    print(f"💰 Награда за задание: {settings.task_reward} {settings.currency_name}")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
