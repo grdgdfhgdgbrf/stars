@@ -417,9 +417,7 @@ async def tasks_mode(update: Update, context: CallbackContext):
         if not completed and not skip_flag and tasks:
             botohub_task = {
                 "link": tasks[0],
-                "price": settings.task_reward,
-                "source": "botohub",
-                "type": "BotoHub"
+                "source": "botohub"
             }
     except Exception as e:
         logger.error(f"Ошибка BotoHub: {e}")
@@ -431,9 +429,7 @@ async def tasks_mode(update: Update, context: CallbackContext):
             if piarflow_tasks:
                 piarflow_task = {
                     "link": piarflow_tasks[0].get("link", ""),
-                    "price": piarflow_tasks[0].get("price", settings.task_reward),
                     "source": "piarflow",
-                    "type": "PiarFlow",
                     "original": piarflow_tasks[0]
                 }
         except Exception as e:
@@ -458,7 +454,7 @@ async def tasks_mode(update: Update, context: CallbackContext):
         )
 
 async def show_task(update: Update, context: CallbackContext, task: Dict, user_id: int):
-    """Показывает одно задание"""
+    """Показывает одно задание с единой ценой из настроек"""
     if isinstance(update, Update):
         if update.callback_query:
             query = update.callback_query
@@ -471,7 +467,7 @@ async def show_task(update: Update, context: CallbackContext, task: Dict, user_i
         msg = await update.message.reply_text("🔄 Загружаем задание...")
     
     task_url = task.get("link", "")
-    task_price = task.get("price", settings.task_reward)
+    task_price = settings.task_reward  # Единая цена из настроек
     
     # Сохраняем текущее задание
     db.current_task[user_id] = task
@@ -518,7 +514,7 @@ async def check_task_callback(update: Update, context: CallbackContext):
     task = db.current_task[user_id]
     task_source = task.get("source", "unknown")
     task_url = task.get("link", "")
-    task_price = task.get("price", settings.task_reward)
+    task_price = settings.task_reward  # Единая цена из настроек
     
     await query.message.edit_text("🔍 **Проверяем выполнение задания...**\n\nПожалуйста, подождите...")
     
@@ -653,13 +649,6 @@ async def next_task_callback(update: Update, context: CallbackContext):
         )
         return
     
-    # Проверяем есть ли задание в очереди
-    if user_id in db.task_queue and db.task_queue[user_id]:
-        task = db.task_queue[user_id].pop(0)
-        db.current_task[user_id] = task
-        await show_task(update, context, task, user_id)
-        return
-    
     await query.message.edit_text("🔄 Получаем новое задание...")
     
     # Пробуем получить задание из BotoHub
@@ -683,16 +672,12 @@ async def next_task_callback(update: Update, context: CallbackContext):
                 if tasks2 and tasks2[0] not in user.get("completed_links", []):
                     botohub_task = {
                         "link": tasks2[0],
-                        "price": settings.task_reward,
-                        "source": "botohub",
-                        "type": "BotoHub"
+                        "source": "botohub"
                     }
             else:
                 botohub_task = {
                     "link": tasks[0],
-                    "price": settings.task_reward,
-                    "source": "botohub",
-                    "type": "BotoHub"
+                    "source": "botohub"
                 }
     except Exception as e:
         logger.error(f"Ошибка BotoHub: {e}")
@@ -707,9 +692,7 @@ async def next_task_callback(update: Update, context: CallbackContext):
                 if "completed_links" in user and link not in user["completed_links"]:
                     piarflow_task = {
                         "link": link,
-                        "price": piarflow_tasks[0].get("price", settings.task_reward),
                         "source": "piarflow",
-                        "type": "PiarFlow",
                         "original": piarflow_tasks[0]
                     }
         except Exception as e:
@@ -1295,6 +1278,7 @@ async def help_menu(update: Update, context: CallbackContext):
         "**📋 Задания:**\n"
         "Нажмите кнопку «Задания» или /tasks\n"
         "Вы получаете одно задание за раз\n"
+        f"💰 Награда за каждое задание: {settings.task_reward} {settings.currency_name}\n"
         "После выполнения можно взять следующее\n\n"
         "**👥 Рефералы:**\n"
         "Приглашайте друзей по ссылке\n"
@@ -1342,6 +1326,7 @@ async def admin_panel(update: Update, context: CallbackContext):
         f"💰 Всего заработано: {format_number(db.global_stats['total_mcoins_earned'])} {settings.currency_name}\n"
         f"✅ Заданий выполнено: {db.global_stats['total_tasks_completed']}\n"
         f"💸 Ожидают вывода: {pending_withdrawals}\n\n"
+        f"💰 **Текущая награда за задание:** {settings.task_reward} {settings.currency_name}\n\n"
         f"Выберите действие:",
         reply_markup=reply_markup
     )
@@ -1352,18 +1337,19 @@ async def admin_rewards_menu(update: Update, context: CallbackContext):
     await query.answer()
     
     keyboard = [
-        [InlineKeyboardButton(f"💰 За задание: {settings.task_reward}", callback_data="set_task_reward")],
-        [InlineKeyboardButton(f"👥 За реферала: {settings.referral_reward}", callback_data="set_ref_reward")],
-        [InlineKeyboardButton(f"🏆 Ежедневный: {settings.daily_reward}", callback_data="set_daily_reward")],
-        [InlineKeyboardButton(f"💸 Мин. вывод: {settings.min_withdraw}", callback_data="set_min_withdraw")],
+        [InlineKeyboardButton(f"💰 За задание: {settings.task_reward} {settings.currency_name}", callback_data="set_task_reward")],
+        [InlineKeyboardButton(f"👥 За реферала: {settings.referral_reward} {settings.currency_name}", callback_data="set_ref_reward")],
+        [InlineKeyboardButton(f"🏆 Ежедневный: {settings.daily_reward} {settings.currency_name}", callback_data="set_daily_reward")],
+        [InlineKeyboardButton(f"💸 Мин. вывод: {settings.min_withdraw} {settings.currency_name}", callback_data="set_min_withdraw")],
         [InlineKeyboardButton(f"📊 Лимит заданий: {settings.max_daily_tasks}", callback_data="set_max_tasks")],
         [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.message.edit_text(
-        "💰 **Настройка наград** 💰\n\n"
-        "Выберите параметр для изменения:",
+        f"💰 **Настройка наград** 💰\n\n"
+        f"💰 **Текущая награда за задание:** {settings.task_reward} {settings.currency_name}\n\n"
+        f"Выберите параметр для изменения:",
         reply_markup=reply_markup
     )
 
@@ -1377,8 +1363,21 @@ async def set_reward_value(update: Update, context: CallbackContext):
     keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_setting")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    # Определяем название настройки для отображения
+    setting_names = {
+        "task_reward": "награды за задание",
+        "ref_reward": "награды за реферала",
+        "daily_reward": "ежедневного бонуса",
+        "min_withdraw": "минимальной суммы вывода",
+        "max_tasks": "лимита заданий"
+    }
+    
+    setting_name = setting_names.get(setting, setting)
+    
     await query.message.edit_text(
-        f"📝 Введите новое значение для '{setting}':",
+        f"📝 **Изменение {setting_name}**\n\n"
+        f"Текущее значение: {getattr(settings, setting, 0)}\n\n"
+        f"Введите новое значение:",
         reply_markup=reply_markup
     )
 
@@ -1398,24 +1397,42 @@ async def reward_value_input(update: Update, context: CallbackContext):
             await update.message.reply_text("❌ Значение должно быть положительным!")
             return
         
+        # Обновляем настройку
         if setting == "task_reward":
             settings.task_reward = value
+            await update.message.reply_text(
+                f"✅ **Награда за задание обновлена!**\n\n"
+                f"💰 Новая награда: {value} {settings.currency_name}\n\n"
+                f"Теперь все задания будут давать {value} {settings.currency_name}."
+            )
         elif setting == "ref_reward":
             settings.referral_reward = value
+            await update.message.reply_text(
+                f"✅ **Награда за реферала обновлена!**\n\n"
+                f"👥 Новая награда: {value} {settings.currency_name}"
+            )
         elif setting == "daily_reward":
             settings.daily_reward = value
+            await update.message.reply_text(
+                f"✅ **Ежедневный бонус обновлен!**\n\n"
+                f"🏆 Новый бонус: {value} {settings.currency_name}"
+            )
         elif setting == "min_withdraw":
             settings.min_withdraw = value
+            await update.message.reply_text(
+                f"✅ **Минимальная сумма вывода обновлена!**\n\n"
+                f"💸 Новый минимум: {value} {settings.currency_name}"
+            )
         elif setting == "max_tasks":
             settings.max_daily_tasks = value
+            await update.message.reply_text(
+                f"✅ **Лимит заданий обновлен!**\n\n"
+                f"📊 Новый лимит: {value} заданий в день"
+            )
         
         settings.save()
         context.user_data.pop("setting_to_change", None)
         
-        await update.message.reply_text(
-            f"✅ Настройка '{setting}' обновлена!\n"
-            f"Новое значение: {value}"
-        )
     except ValueError:
         await update.message.reply_text("❌ Введите корректное число!")
 
@@ -1768,7 +1785,8 @@ async def admin_stats_callback(update: Update, context: CallbackContext):
         f"• Всего: {total_withdraw_requests}\n\n"
         f"✅ **Задания:**\n"
         f"• Всего выполнено: {total_tasks}\n"
-        f"• В среднем на пользователя: {total_tasks // total_users if total_users > 0 else 0}",
+        f"• В среднем на пользователя: {total_tasks // total_users if total_users > 0 else 0}\n"
+        f"💰 **Награда за задание:** {settings.task_reward} {settings.currency_name}",
         reply_markup=reply_markup
     )
 
@@ -2011,7 +2029,8 @@ async def admin_settings_callback(update: Update, context: CallbackContext):
         f"🔄 Режим обслуживания: {'Включен' if settings.maintenance_mode else 'Выключен'}\n"
         f"📊 Лимит задач в день: {settings.max_daily_tasks}\n"
         f"💳 Комиссия вывода: {int(settings.withdraw_commission * 100)}%\n"
-        f"👤 Вывод на Telegram username\n\n"
+        f"👤 Вывод на Telegram username\n"
+        f"💰 Награда за задание: {settings.task_reward} {settings.currency_name}\n\n"
         f"Выберите действие:",
         reply_markup=reply_markup
     )
@@ -2088,6 +2107,7 @@ async def start(update: Update, context: CallbackContext):
         f"• 👥 Приглашать друзей и получать бонусы\n"
         f"• 🏆 Получать ежедневные бонусы\n"
         f"• 💸 Выводить на Telegram username\n\n"
+        f"💰 Награда за задание: {settings.task_reward} {settings.currency_name}\n"
         f"👤 Ваш username: @{username}\n"
         f"💰 Ваш баланс: 0 {settings.currency_name}"
         f"{sub_text}"
