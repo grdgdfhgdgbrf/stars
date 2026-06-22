@@ -48,11 +48,14 @@ ADMIN_ID = 5356400377
  AWAITING_SETTING_VALUE, AWAITING_FORCE_SUB_INPUT, AWAITING_CONTEST_NAME,
  AWAITING_CONTEST_DESC, AWAITING_CONTEST_PRIZE, AWAITING_CONTEST_DURATION,
  AWAITING_CONTEST_TYPE, AWAITING_CONTEST_TARGET, AWAITING_EDIT_SETTING,
- AWAITING_PRIZE_1, AWAITING_PRIZE_2, AWAITING_PRIZE_3, AWAITING_CUSTOM_TASK) = range(19)
+ AWAITING_PRIZE_1, AWAITING_PRIZE_2, AWAITING_PRIZE_3, AWAITING_CURRENCY_NAME,
+ AWAITING_CURRENCY_EMOJI, AWAITING_CUSTOM_TASK) = range(21)
 
 # Файлы для хранения данных
 DATA_FILE = "bot_data.json"
 SETTINGS_FILE = "settings.json"
+CONTESTS_FILE = "contests.json"
+TASKS_FILE = "custom_tasks.json"
 
 # ========== ЭМОДЗИ ДЛЯ ВАЛЮТ ==========
 CURRENCY_EMOJIS = {
@@ -92,7 +95,7 @@ class BotDatabase:
         self.notifications: Dict[int, List[Dict]] = {}
         self.last_notification: Dict[int, datetime] = {}
         self.contest_participants: Dict[int, List[int]] = {}
-        self.custom_tasks: List[Dict] = []
+        self.custom_tasks: Dict[int, Dict] = {}
         
     def save(self):
         data = {
@@ -140,7 +143,7 @@ class BotDatabase:
                     self.notifications = {int(k): v for k, v in data.get("notifications", {}).items()}
                     self.last_notification = {int(k): datetime.fromisoformat(v) for k, v in data.get("last_notification", {}).items()}
                     self.contest_participants = {int(k): v for k, v in data.get("contest_participants", {}).items()}
-                    self.custom_tasks = data.get("custom_tasks", [])
+                    self.custom_tasks = {int(k): v for k, v in data.get("custom_tasks", {}).items()}
                 logger.info("Данные загружены")
             except Exception as e:
                 logger.error(f"Ошибка загрузки данных: {e}")
@@ -263,7 +266,7 @@ def add_mcoins(user_id: int, amount: int, reason: str = "", source: str = "other
     user["mcoin"] += amount
     user["total_earned"] += amount
     
-    if source in ["task", "botohub", "piarflow", "custom"]:
+    if source in ["task", "botohub", "piarflow"]:
         user["task_earned"] += amount
         user["total_tasks_completed"] += 1
         user["monthly_tasks"] += 1
@@ -277,6 +280,12 @@ def add_mcoins(user_id: int, amount: int, reason: str = "", source: str = "other
         user["task_earned"] += amount
     elif source == "contest":
         user["contest_wins"] += 1
+    elif source == "custom_task":
+        user["task_earned"] += amount
+        user["total_tasks_completed"] += 1
+        user["monthly_tasks"] += 1
+        db.global_stats["total_tasks_completed"] += 1
+        update_top_users(user_id)
     
     db.global_stats["total_mcoins_earned"] += amount
     db.save()
@@ -384,6 +393,191 @@ async def check_new_tasks(context: CallbackContext):
         except:
             pass
 
+# ========== СОЗДАНИЕ КАСТОМНЫХ ЗАДАНИЙ ==========
+async def create_custom_task_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.from_user.id not in settings.admin_list:
+        await query.message.edit_text("⛔ Только для администратора!")
+        return
+    
+    context.user_data["custom_task_step"] = "link"
+    
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_custom_task")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.edit_text(
+        "📝 **Создание задания**\n\n"
+        "Введите ссылку на задание (канал, группу и т.д.):",
+        reply_markup=reply_markup
+    )
+
+async def custom_task_link_input(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    if user_id not in settings.admin_list:
+        return
+    
+    context.user_data["custom_task_link"] = update.message.text
+    context.user_data["custom_task_step"] = "reward"
+    
+    currency = get_currency_symbol()
+    
+    await update.message.reply_text(
+        f"🔗 Ссылка: {context.user_data['custom_task_link']}\n\n"
+        f"Введите награду за выполнение задания ({currency}):"
+    )
+
+async def custom_task_reward_input(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    if user_id not in settings.admin_list:
+        return
+    
+    try:
+        reward = int(update.message.text)
+        if reward <= 0:
+            await update.message.reply_text("❌ Награда должна быть положительной!")
+            return
+        
+        context.user_data["custom_task_reward"] = reward
+        context.user_data["custom_task_step"] = "description"
+        
+        await update.message.reply_text(
+            f"🔗 Ссылка: {context.user_data['custom_task_link']}\n"
+            f"💰 Награда: {reward} {settings.currency_name}\n\n"
+            f"Введите описание задания (будет показано пользователям):"
+        )
+    except ValueError:
+        await update.message.reply_text("❌ Введите корректное число!")
+
+async def custom_task_desc_input(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    if user_id not in settings.admin_list:
+        return
+    
+    task_id = len(db.custom_tasks) + 1
+    now = datetime.now()
+    
+    db.custom_tasks[task_id] = {
+        "id": task_id,
+        "link": context.user_data["custom_task_link"],
+        "reward": context.user_data["custom_task_reward"],
+        "description": update.message.text,
+        "created_by": user_id,
+        "created_at": now.isoformat(),
+        "active": True,
+        "completed_by": []
+    }
+    
+    db.save()
+    
+    context.user_data.pop("custom_task_step", None)
+    context.user_data.pop("custom_task_link", None)
+    context.user_data.pop("custom_task_reward", None)
+    
+    currency = get_currency_symbol()
+    
+    await update.message.reply_text(
+        f"✅ **Задание создано!**\n\n"
+        f"🔗 Ссылка: {db.custom_tasks[task_id]['link']}\n"
+        f"💰 Награда: {db.custom_tasks[task_id]['reward']} {currency}\n"
+        f"📝 Описание: {db.custom_tasks[task_id]['description']}\n\n"
+        f"Задание доступно для всех пользователей!"
+    )
+    
+    # Уведомляем пользователей о новом задании
+    await broadcast_notification(
+        context,
+        f"📢 **Новое задание от администратора!**\n\n"
+        f"📝 {db.custom_tasks[task_id]['description']}\n"
+        f"💰 Награда: {db.custom_tasks[task_id]['reward']} {currency}\n"
+        f"🔗 Ссылка: {db.custom_tasks[task_id]['link']}\n\n"
+        f"Выполните задание через кнопку «Задания»!"
+    )
+
+async def cancel_custom_task_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data.pop("custom_task_step", None)
+    context.user_data.pop("custom_task_link", None)
+    context.user_data.pop("custom_task_reward", None)
+    
+    await query.message.edit_text("❌ Создание задания отменено.")
+
+async def custom_tasks_mode(update: Update, context: CallbackContext):
+    """Выполнение кастомных заданий"""
+    user_id = update.effective_user.id
+    
+    if not settings.custom_tasks_enabled:
+        await update.message.reply_text("❌ Кастомные задания временно недоступны!")
+        return
+    
+    active_tasks = {k: v for k, v in db.custom_tasks.items() if v.get("active", False)}
+    
+    if not active_tasks:
+        await update.message.reply_text("📭 Нет активных кастомных заданий.")
+        return
+    
+    for task_id, task in active_tasks.items():
+        if user_id in task.get("completed_by", []):
+            continue
+        
+        keyboard = [
+            [InlineKeyboardButton("📎 Перейти к заданию", url=task["link"])],
+            [InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_custom_task_{task_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        currency = get_currency_symbol()
+        
+        await update.message.reply_text(
+            f"📢 **Кастомное задание** 📢\n\n"
+            f"📝 {task['description']}\n"
+            f"🔗 Ссылка: {task['link']}\n"
+            f"💰 Награда: {task['reward']} {currency}\n\n"
+            f"Выполните задание и нажмите «Выполнено»",
+            reply_markup=reply_markup,
+            disable_web_page_preview=True
+        )
+
+async def complete_custom_task_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    task_id = int(query.data.replace("complete_custom_task_", ""))
+    user_id = query.from_user.id
+    
+    if task_id not in db.custom_tasks:
+        await query.message.edit_text("❌ Задание не найдено!")
+        return
+    
+    task = db.custom_tasks[task_id]
+    
+    if not task.get("active", False):
+        await query.message.edit_text("❌ Задание уже неактивно!")
+        return
+    
+    if user_id in task.get("completed_by", []):
+        await query.message.edit_text("✅ Вы уже выполнили это задание!")
+        return
+    
+    # Начисляем награду
+    reward = task.get("reward", settings.task_reward)
+    add_mcoins(user_id, reward, f"custom_task_{task_id}", "custom_task")
+    
+    if "completed_by" not in task:
+        task["completed_by"] = []
+    task["completed_by"].append(user_id)
+    db.save()
+    
+    currency = get_currency_symbol()
+    
+    await query.message.edit_text(
+        f"✅ **Задание выполнено!**\n\n"
+        f"💰 Вы получили: {reward} {currency}"
+    )
+
 # ========== КОНКУРСЫ ==========
 async def contests_menu(update: Update, context: CallbackContext):
     if not settings.contest_enabled:
@@ -396,6 +590,10 @@ async def contests_menu(update: Update, context: CallbackContext):
         [InlineKeyboardButton("🏆 Победители", callback_data="contest_winners")],
         [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
     ]
+    
+    # Кнопка создания конкурсов только для админов
+    if update.effective_user.id in settings.admin_list:
+        keyboard.insert(0, [InlineKeyboardButton("➕ Создать конкурс", callback_data="create_contest")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -417,16 +615,20 @@ async def create_contest_callback(update: Update, context: CallbackContext):
     context.user_data["contest_step"] = "type"
     
     keyboard = [
-        [InlineKeyboardButton("🏆 Топовый (кто больше)", callback_data="contest_type_top")],
-        [InlineKeyboardButton("🎯 Целевой (достигни цели)", callback_data="contest_type_target")],
+        [InlineKeyboardButton("📋 Топовый конкурс (кто больше)", callback_data="contest_type_tasks")],
+        [InlineKeyboardButton("👥 Реферальный конкурс (кто больше)", callback_data="contest_type_referrals")],
+        [InlineKeyboardButton("🎯 Достижение количества заданий", callback_data="contest_type_achievement")],
+        [InlineKeyboardButton("👥 Достижение количества рефералов", callback_data="contest_type_ref_achievement")],
         [InlineKeyboardButton("❌ Отмена", callback_data="cancel_contest")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.message.edit_text(
         "🎯 **Выбор типа конкурса** 🎯\n\n"
-        "🏆 **Топовый конкурс** - побеждают те, кто выполнит больше всего заданий/рефералов\n"
-        "🎯 **Целевой конкурс** - побеждают все, кто достигнет установленной цели\n\n"
+        "📋 **Топовый конкурс** - побеждают те, кто выполнит больше заданий\n"
+        "👥 **Реферальный конкурс** - побеждают те, кто пригласит больше друзей\n"
+        "🎯 **Достижение количества заданий** - кто первый достигнет цели\n"
+        "👥 **Достижение количества рефералов** - кто первый достигнет цели\n\n"
         "Выберите тип конкурса:",
         reply_markup=reply_markup
     )
@@ -443,8 +645,10 @@ async def contest_type_callback(update: Update, context: CallbackContext):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     type_names = {
-        "top": "🏆 Топовый",
-        "target": "🎯 Целевой"
+        "tasks": "📋 Топовый (по заданиям)",
+        "referrals": "👥 Реферальный (по приглашениям)",
+        "achievement": "🎯 Достижение по заданиям",
+        "ref_achievement": "👥 Достижение по рефералам"
     }
     
     await query.message.edit_text(
@@ -494,24 +698,31 @@ async def contest_prize_input(update: Update, context: CallbackContext):
             return
         
         context.user_data["contest_prize"] = prize
-        context.user_data["contest_step"] = "target"
         
-        contest_type = context.user_data.get("contest_type", "top")
+        contest_type = context.user_data.get("contest_type", "tasks")
         
-        if contest_type == "top":
+        if contest_type in ["achievement", "ref_achievement"]:
+            context.user_data["contest_step"] = "target"
+            
+            type_names = {
+                "achievement": "заданий",
+                "ref_achievement": "рефералов"
+            }
+            
             await update.message.reply_text(
                 f"📝 Название: {context.user_data['contest_name']}\n"
                 f"📝 Описание: {context.user_data['contest_desc']}\n"
                 f"💰 Приз: {prize} {settings.currency_name}\n\n"
-                "Укажите, что будет считаться для топа:\n"
-                "Введите количество заданий или рефералов (например: 50):"
+                f"Введите количество {type_names.get(contest_type, '')} для победы:"
             )
-        else:  # target
+        else:
+            context.user_data["contest_step"] = "duration"
+            
             await update.message.reply_text(
                 f"📝 Название: {context.user_data['contest_name']}\n"
                 f"📝 Описание: {context.user_data['contest_desc']}\n"
                 f"💰 Приз: {prize} {settings.currency_name}\n\n"
-                "Введите цель для достижения (количество заданий/рефералов):"
+                f"Введите длительность конкурса (в часах):"
             )
     except ValueError:
         await update.message.reply_text("❌ Введите корректное число!")
@@ -534,8 +745,8 @@ async def contest_target_input(update: Update, context: CallbackContext):
             f"📝 Название: {context.user_data['contest_name']}\n"
             f"📝 Описание: {context.user_data['contest_desc']}\n"
             f"💰 Приз: {context.user_data['contest_prize']} {settings.currency_name}\n"
-            f"🎯 Цель/Топ: {target}\n\n"
-            "Введите длительность конкурса (в часах):"
+            f"🎯 Цель: {target}\n\n"
+            f"Введите длительность конкурса (в часах):"
         )
     except ValueError:
         await update.message.reply_text("❌ Введите корректное число!")
@@ -553,15 +764,14 @@ async def contest_duration_input(update: Update, context: CallbackContext):
         
         contest_id = len(db.contests) + 1
         now = datetime.now()
-        contest_type = context.user_data.get("contest_type", "top")
         
         db.contests[contest_id] = {
             "id": contest_id,
             "name": context.user_data["contest_name"],
             "description": context.user_data["contest_desc"],
             "prize": context.user_data["contest_prize"],
-            "type": contest_type,
-            "target": context.user_data["contest_target"],
+            "type": context.user_data.get("contest_type", "tasks"),
+            "target": context.user_data.get("contest_target", 0),
             "duration": duration,
             "start_date": now.isoformat(),
             "end_date": (now + timedelta(hours=duration)).isoformat(),
@@ -570,8 +780,7 @@ async def contest_duration_input(update: Update, context: CallbackContext):
             "active": True,
             "created_by": user_id,
             "created_at": now.isoformat(),
-            "notified": False,
-            "scores": {}
+            "notified": False
         }
         
         db.save()
@@ -585,15 +794,17 @@ async def contest_duration_input(update: Update, context: CallbackContext):
         context.user_data.pop("contest_target", None)
         
         type_names = {
-            "top": "🏆 Топовый (кто больше)",
-            "target": "🎯 Целевой (достигни цели)"
+            "tasks": "📋 Топовый (по заданиям)",
+            "referrals": "👥 Реферальный (по приглашениям)",
+            "achievement": "🎯 Достижение по заданиям",
+            "ref_achievement": "👥 Достижение по рефералам"
         }
         
         await update.message.reply_text(
             f"✅ **Конкурс создан!** 🎉\n\n"
             f"📝 Название: {db.contests[contest_id]['name']}\n"
             f"📝 Тип: {type_names.get(db.contests[contest_id]['type'], '')}\n"
-            f"🎯 Цель/Топ: {db.contests[contest_id]['target']}\n"
+            f"🎯 Цель: {db.contests[contest_id]['target']}\n"
             f"💰 Приз: {db.contests[contest_id]['prize']} {settings.currency_name}\n"
             f"⏱️ Длительность: {duration} часов\n\n"
             f"Участники могут присоединиться через кнопку «Конкурсы»."
@@ -638,7 +849,7 @@ async def active_contests_callback(update: Update, context: CallbackContext):
         hours = time_left.seconds // 3600
         minutes = (time_left.seconds % 3600) // 60
         
-        type_emoji = "🏆" if contest["type"] == "top" else "🎯"
+        type_emoji = "📋" if contest["type"] in ["tasks", "achievement"] else "👥" if contest["type"] in ["referrals", "ref_achievement"] else "🎯"
         
         keyboard.append([InlineKeyboardButton(
             f"{type_emoji} {contest['name']} (осталось {hours}ч {minutes}м)",
@@ -650,8 +861,9 @@ async def active_contests_callback(update: Update, context: CallbackContext):
     
     await query.message.edit_text(
         "🎯 **Активные конкурсы** 🎯\n\n"
-        "🏆 Топовые - кто больше выполнит\n"
-        "🎯 Целевые - достигни цели\n\n"
+        "📋 Топовые - кто больше\n"
+        "👥 Реферальные - кто больше\n"
+        "🎯 Достижение - кто первый достигнет цели\n\n"
         "Выберите конкурс для участия:",
         reply_markup=reply_markup
     )
@@ -677,8 +889,10 @@ async def contest_detail_callback(update: Update, context: CallbackContext):
     is_participant = query.from_user.id in contest.get("participants", [])
     
     type_names = {
-        "top": "🏆 Топовый (кто больше)",
-        "target": "🎯 Целевой (достигни цели)"
+        "tasks": "📋 Топовый (по заданиям)",
+        "referrals": "👥 Реферальный (по приглашениям)",
+        "achievement": "🎯 Достижение по заданиям",
+        "ref_achievement": "👥 Достижение по рефералам"
     }
     
     keyboard = []
@@ -691,15 +905,13 @@ async def contest_detail_callback(update: Update, context: CallbackContext):
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="active_contests")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    participant_count = len(contest.get("participants", []))
-    
     await query.message.edit_text(
         f"🎯 **{contest['name']}**\n\n"
         f"📝 {contest['description']}\n\n"
         f"📋 Тип: {type_names.get(contest['type'], '')}\n"
-        f"🎯 Цель/Топ: {contest['target']}\n"
+        f"🎯 Цель: {contest['target']}\n"
         f"💰 Приз: {contest['prize']} {currency}\n"
-        f"👥 Участников: {participant_count}\n"
+        f"👥 Участников: {len(contest.get('participants', []))}\n"
         f"⏱️ Осталось: {hours}ч {minutes}м\n"
         f"📅 Начало: {contest['start_date'][:10]}\n\n"
         f"{'✅ Вы участвуете!' if is_participant else 'Нажмите «Участвовать» чтобы присоединиться!'}",
@@ -730,12 +942,6 @@ async def join_contest_callback(update: Update, context: CallbackContext):
     if "participants" not in contest:
         contest["participants"] = []
     contest["participants"].append(user_id)
-    
-    # Инициализируем счет
-    if "scores" not in contest:
-        contest["scores"] = {}
-    contest["scores"][user_id] = 0
-    
     db.save()
     
     await query.message.edit_text(
@@ -776,192 +982,125 @@ async def end_contest_callback(update: Update, context: CallbackContext):
         await query.message.edit_text("❌ Нет участников для выбора победителей!")
         return
     
-    # Обновляем очки участников
+    # Определяем победителей в зависимости от типа конкурса
+    winners = []
     for uid in participants:
         user = get_user_data(uid)
-        if contest["type"] == "top":
-            # Для топового конкурса считаем общее количество
-            score = user.get("total_tasks_completed", 0) + len(user.get("referrals", []))
-        else:  # target
-            # Для целевого конкурса считаем прогресс
-            score = user.get("monthly_tasks", 0) + len(user.get("referrals", []))
         
-        contest["scores"][uid] = score
+        if contest["type"] == "tasks":
+            score = user.get("monthly_tasks", 0)
+        elif contest["type"] == "referrals":
+            score = len(user.get("referrals", []))
+        elif contest["type"] == "achievement":
+            score = user.get("monthly_tasks", 0)
+        else:  # ref_achievement
+            score = len(user.get("referrals", []))
+        
+        winners.append({
+            "user_id": uid,
+            "score": score,
+            "username": user.get("username", "Неизвестно"),
+            "name": user.get("first_name", "Пользователь")
+        })
     
+    winners.sort(key=lambda x: x["score"], reverse=True)
+    winners = winners[:3]
+    
+    # Проверяем, достигли ли победители цели
     target = contest.get("target", 0)
-    contest_type = contest.get("type", "top")
     
-    if contest_type == "top":
-        # Топовый конкурс - выбираем лучших
-        winners = []
-        for uid in participants:
-            winners.append({
-                "user_id": uid,
-                "score": contest["scores"].get(uid, 0),
-                "username": db.users.get(uid, {}).get("username", "Неизвестно"),
-                "name": db.users.get(uid, {}).get("first_name", "Пользователь")
-            })
-        
-        winners.sort(key=lambda x: x["score"], reverse=True)
-        winners = winners[:3]  # Только 3 победителя
-        
-        # Проверяем, есть ли победители
-        if not winners or winners[0]["score"] == 0:
-            contest["active"] = False
-            contest["ended_at"] = datetime.now().isoformat()
-            db.save()
-            
-            await query.message.edit_text(
-                f"❌ **Никто не набрал очков!**\n\n"
-                f"Конкурс завершен без победителей."
-            )
-            
-            for uid in participants:
-                await send_notification(
-                    context,
-                    uid,
-                    f"🏁 **Конкурс завершен!**\n\n"
-                    f"🎯 {contest['name']}\n"
-                    f"К сожалению, никто не набрал очков.\n\n"
-                    f"Следите за новыми конкурсами!"
-                )
-            return
-        
-        contest["winners"] = winners
-        contest["active"] = False
-        contest["ended_at"] = datetime.now().isoformat()
-        db.save()
-        
-        currency = get_currency_symbol()
-        
-        # Начисляем призы
-        prize_text = ""
-        prize_amounts = [50, 30, 20]  # Проценты для 1, 2, 3 места
-        
-        for i, winner in enumerate(winners[:3]):
-            prize_percent = prize_amounts[i] if i < len(prize_amounts) else 10
-            prize_amount = contest["prize"] * prize_percent // 100
-            
-            add_mcoins(winner["user_id"], prize_amount, f"contest_{contest_id}_place_{i+1}", "contest")
-            prize_text += f"{i+1}. @{winner['username']} - {prize_amount} {currency}\n"
-            
-            await send_notification(
-                context,
-                winner["user_id"],
-                f"🏆 **Вы победили в конкурсе!** 🏆\n\n"
-                f"🎯 {contest['name']}\n"
-                f"🥇 Место: {i+1}\n"
-                f"💰 Приз: {prize_amount} {currency}\n"
-                f"📊 Очков: {winner['score']}\n\n"
-                f"Поздравляем! 🎉"
-            )
-        
-        # Уведомляем всех участников
-        for uid in participants:
-            if uid not in [w["user_id"] for w in winners]:
-                score = contest["scores"].get(uid, 0)
-                await send_notification(
-                    context,
-                    uid,
-                    f"🏁 **Конкурс завершен!**\n\n"
-                    f"🎯 {contest['name']}\n"
-                    f"📊 Ваш результат: {score} очков\n\n"
-                    f"Победители:\n{prize_text}\n\n"
-                    f"Следите за новыми конкурсами!"
-                )
-        
-        await query.message.edit_text(
-            f"🏁 **Конкурс завершен!** 🏆\n\n"
-            f"🎯 {contest['name']}\n\n"
-            f"**Победители:**\n{prize_text}\n\n"
-            f"Призы начислены!"
-        )
-        
-    else:  # target
-        # Целевой конкурс - все, кто достиг цели
-        qualified = []
-        for uid in participants:
-            score = contest["scores"].get(uid, 0)
-            if score >= target:
-                qualified.append({
-                    "user_id": uid,
-                    "score": score,
-                    "username": db.users.get(uid, {}).get("username", "Неизвестно"),
-                    "name": db.users.get(uid, {}).get("first_name", "Пользователь")
-                })
-        
-        if not qualified:
+    # Для конкурсов достижения - только первый достигший цели
+    if contest["type"] in ["achievement", "ref_achievement"]:
+        qualified_winners = [w for w in winners if w["score"] >= target]
+        if not qualified_winners:
             contest["active"] = False
             contest["ended_at"] = datetime.now().isoformat()
             db.save()
             
             await query.message.edit_text(
                 f"❌ **Никто не достиг цели!**\n\n"
-                f"🎯 Цель: {target} очков\n"
+                f"🎯 Цель: {target}\n"
                 f"Победителей нет."
             )
             
             for uid in participants:
-                score = contest["scores"].get(uid, 0)
                 await send_notification(
                     context,
                     uid,
                     f"🏁 **Конкурс завершен!**\n\n"
                     f"🎯 {contest['name']}\n"
-                    f"📊 Ваш результат: {score} очков\n"
-                    f"🎯 Цель: {target} очков\n\n"
-                    f"К сожалению, вы не достигли цели.\n"
+                    f"К сожалению, никто не достиг цели в {target} очков.\n\n"
                     f"Следите за новыми конкурсами!"
                 )
             return
         
-        contest["winners"] = qualified
-        contest["active"] = False
-        contest["ended_at"] = datetime.now().isoformat()
-        db.save()
+        # Для достижения берем только первого, кто достиг цели
+        first_winner = qualified_winners[0]
+        qualified_winners = [first_winner]
+    else:
+        # Для топовых конкурсов - топ 3 с максимальным счетом
+        qualified_winners = winners[:3]
+    
+    contest["winners"] = qualified_winners
+    contest["active"] = False
+    contest["ended_at"] = datetime.now().isoformat()
+    db.save()
+    
+    currency = get_currency_symbol()
+    
+    # Начисляем призы
+    prize_text = ""
+    for i, winner in enumerate(qualified_winners[:3]):
+        if len(qualified_winners) == 1:
+            prize_amount = contest["prize"]  # Весь приз первому
+        else:
+            if i == 0:
+                prize_amount = contest["prize"] * 50 // 100
+            elif i == 1:
+                prize_amount = contest["prize"] * 30 // 100
+            else:
+                prize_amount = contest["prize"] * 20 // 100
         
-        currency = get_currency_symbol()
+        add_mcoins(winner["user_id"], prize_amount, f"contest_{contest_id}_place_{i+1}", "contest")
+        prize_text += f"{i+1}. @{winner['username']} - {prize_amount} {currency}\n"
         
-        # Начисляем призы всем, кто достиг цели
-        prize_per_person = contest["prize"] // len(qualified) if len(qualified) > 0 else 0
-        prize_text = ""
-        
-        for winner in qualified:
-            add_mcoins(winner["user_id"], prize_per_person, f"contest_{contest_id}_target", "contest")
-            prize_text += f"✅ @{winner['username']} - {prize_per_person} {currency}\n"
+        await send_notification(
+            context,
+            winner["user_id"],
+            f"🏆 **Вы победили в конкурсе!** 🏆\n\n"
+            f"🎯 {contest['name']}\n"
+            f"🥇 Место: {i+1}\n"
+            f"💰 Приз: {prize_amount} {currency}\n"
+            f"📊 Очков: {winner['score']}\n\n"
+            f"Поздравляем! 🎉"
+        )
+    
+    # Уведомляем всех участников
+    for uid in participants:
+        if uid not in [w["user_id"] for w in qualified_winners]:
+            user = get_user_data(uid)
+            if contest["type"] in ["tasks", "achievement"]:
+                score = user.get("monthly_tasks", 0)
+            else:
+                score = len(user.get("referrals", []))
             
             await send_notification(
                 context,
-                winner["user_id"],
-                f"🏆 **Вы достигли цели в конкурсе!** 🏆\n\n"
+                uid,
+                f"🏁 **Конкурс завершен!**\n\n"
                 f"🎯 {contest['name']}\n"
-                f"🎯 Цель: {target} очков\n"
-                f"📊 Ваш результат: {winner['score']} очков\n"
-                f"💰 Приз: {prize_per_person} {currency}\n\n"
-                f"Поздравляем! 🎉"
+                f"📊 Ваш результат: {score} очков\n"
+                f"🎯 Цель: {target} очков\n\n"
+                f"Победители:\n{prize_text}\n\n"
+                f"Следите за новыми конкурсами!"
             )
-        
-        # Уведомляем всех участников
-        for uid in participants:
-            if uid not in [w["user_id"] for w in qualified]:
-                score = contest["scores"].get(uid, 0)
-                await send_notification(
-                    context,
-                    uid,
-                    f"🏁 **Конкурс завершен!**\n\n"
-                    f"🎯 {contest['name']}\n"
-                    f"📊 Ваш результат: {score} очков\n"
-                    f"🎯 Цель: {target} очков\n\n"
-                    f"Победители достигшие цели:\n{prize_text}\n\n"
-                    f"Следите за новыми конкурсами!"
-                )
-        
-        await query.message.edit_text(
-            f"🏁 **Конкурс завершен!** 🏆\n\n"
-            f"🎯 {contest['name']}\n\n"
-            f"**Достигли цели:**\n{prize_text}\n\n"
-            f"Призы начислены!"
-        )
+    
+    await query.message.edit_text(
+        f"🏁 **Конкурс завершен!** 🏆\n\n"
+        f"🎯 {contest['name']}\n\n"
+        f"**Победители:**\n{prize_text}\n\n"
+        f"Призы начислены!"
+    )
 
 async def my_contests_callback(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -973,9 +1112,8 @@ async def my_contests_callback(update: Update, context: CallbackContext):
     for cid, contest in db.contests.items():
         if user_id in contest.get("participants", []):
             status = "🟢 Активен" if contest.get("active", False) else "🔴 Завершен"
-            type_emoji = "🏆" if contest["type"] == "top" else "🎯"
-            score = contest.get("scores", {}).get(user_id, 0)
-            my_contests.append(f"{type_emoji} {contest['name']} - {status} (очков: {score})")
+            type_emoji = "📋" if contest["type"] in ["tasks", "achievement"] else "👥" if contest["type"] in ["referrals", "ref_achievement"] else "🎯"
+            my_contests.append(f"{type_emoji} {contest['name']} - {status}")
     
     if not my_contests:
         await query.message.edit_text(
@@ -1013,19 +1151,15 @@ async def contest_winners_callback(update: Update, context: CallbackContext):
     text = "🏆 **Победители конкурсов** 🏆\n\n"
     
     for cid, contest in list(completed.items())[-5:]:
-        type_emoji = "🏆" if contest["type"] == "top" else "🎯"
+        type_emoji = "📋" if contest["type"] in ["tasks", "achievement"] else "👥" if contest["type"] in ["referrals", "ref_achievement"] else "🎯"
         text += f"{type_emoji} {contest['name']}\n"
-        
-        if contest["type"] == "top":
-            for i, winner in enumerate(contest.get("winners", [])[:3]):
-                emoji = "🥇" if i == 0 else "🥈" if i == 1 else "🥉"
-                prize_percent = [50, 30, 20][i] if i < 3 else 10
-                prize = contest["prize"] * prize_percent // 100
-                text += f"  {emoji} @{winner['username']} - {winner['score']} очков ({prize} {currency})\n"
-        else:  # target
-            for winner in contest.get("winners", [])[:5]:
-                prize_per_person = contest["prize"] // len(contest.get("winners", [1])) if contest.get("winners") else 0
-                text += f"  ✅ @{winner['username']} - {winner['score']} очков ({prize_per_person} {currency})\n"
+        for i, winner in enumerate(contest.get("winners", [])[:3]):
+            emoji = "🥇" if i == 0 else "🥈" if i == 1 else "🥉"
+            if len(contest.get("winners", [])) == 1:
+                prize = contest["prize"]
+            else:
+                prize = contest["prize"] * (50 if i == 0 else 30 if i == 1 else 20) // 100
+            text += f"  {emoji} @{winner['username']} - {winner['score']} очков ({prize} {currency})\n"
         text += "\n"
     
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="contests_menu")]]
@@ -1207,6 +1341,28 @@ async def tasks_mode(update: Update, context: CallbackContext):
         )
         return
     
+    # Проверяем кастомные задания
+    if settings.custom_tasks_enabled:
+        active_custom_tasks = {k: v for k, v in db.custom_tasks.items() if v.get("active", False)}
+        for task_id, task in active_custom_tasks.items():
+            if user_id not in task.get("completed_by", []):
+                keyboard = [
+                    [InlineKeyboardButton("📎 Перейти к заданию", url=task["link"])],
+                    [InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_custom_task_{task_id}")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await update.message.reply_text(
+                    f"📢 **Кастомное задание** 📢\n\n"
+                    f"📝 {task['description']}\n"
+                    f"🔗 Ссылка: {task['link']}\n"
+                    f"💰 Награда: {task['reward']} {currency}\n\n"
+                    f"Выполните задание и нажмите «Выполнено»",
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True
+                )
+                return
+    
     if user_id in db.current_task:
         task = db.current_task[user_id]
         await show_task(update, context, task, user_id)
@@ -1216,59 +1372,34 @@ async def tasks_mode(update: Update, context: CallbackContext):
     
     botohub_task = None
     piarflow_task = None
-    custom_task = None
     
-    # Проверяем пользовательские задания
-    if settings.custom_tasks_enabled and db.custom_tasks:
-        # Проверяем, не выполнил ли пользователь уже это задание
-        available_tasks = [t for t in db.custom_tasks if t.get("active", True)]
-        if available_tasks:
-            for task in available_tasks:
-                task_id = task.get("id", 0)
-                if task_id not in user.get("completed_custom_tasks", []):
-                    custom_task = {
-                        "link": task.get("link", ""),
-                        "source": "custom",
-                        "price": task.get("reward", settings.task_reward),
-                        "id": task_id,
-                        "name": task.get("name", "Пользовательское задание")
-                    }
-                    break
+    try:
+        result = await call_botohub_api(user_id, is_task=True, skip=False)
+        tasks = result.get("tasks", [])
+        completed = result.get("completed", False)
+        skip_flag = result.get("skip", False)
+        
+        if not completed and not skip_flag and tasks:
+            botohub_task = {
+                "link": tasks[0],
+                "source": "botohub"
+            }
+    except Exception as e:
+        logger.error(f"Ошибка BotoHub: {e}")
     
-    if not custom_task:
-        try:
-            result = await call_botohub_api(user_id, is_task=True, skip=False)
-            tasks = result.get("tasks", [])
-            completed = result.get("completed", False)
-            skip_flag = result.get("skip", False)
-            
-            if not completed and not skip_flag and tasks:
-                botohub_task = {
-                    "link": tasks[0],
-                    "source": "botohub",
-                    "price": settings.task_reward
-                }
-        except Exception as e:
-            logger.error(f"Ошибка BotoHub: {e}")
-    
-    if not botohub_task and not custom_task:
+    if not botohub_task:
         try:
             piarflow_tasks, msg_pf = await get_piarflow_tasks(user_id, update.message.chat.id)
             if piarflow_tasks:
                 piarflow_task = {
                     "link": piarflow_tasks[0].get("link", ""),
                     "source": "piarflow",
-                    "price": piarflow_tasks[0].get("price", settings.task_reward),
                     "original": piarflow_tasks[0]
                 }
         except Exception as e:
             logger.error(f"Ошибка PiarFlow: {e}")
     
-    if custom_task:
-        task = custom_task
-        db.current_task[user_id] = task
-        await show_task(update, context, task, user_id)
-    elif botohub_task:
+    if botohub_task:
         task = botohub_task
         db.current_task[user_id] = task
         await show_task(update, context, task, user_id)
@@ -1298,36 +1429,27 @@ async def show_task(update: Update, context: CallbackContext, task: Dict, user_i
         msg = await update.message.reply_text("🔄 Загружаем задание...")
     
     task_url = task.get("link", "")
-    task_price = task.get("price", settings.task_reward)
-    task_source = task.get("source", "unknown")
+    task_price = settings.task_reward
     currency = get_currency_symbol()
     
     db.current_task[user_id] = task
     
     keyboard = [
         [InlineKeyboardButton("📎 Перейти к заданию", url=task_url)],
-        [InlineKeyboardButton("✅ Проверить выполнение", callback_data=f"check_task_{user_id}")]
+        [InlineKeyboardButton("✅ Проверить выполнение", callback_data=f"check_task_{user_id}")],
+        [InlineKeyboardButton("⏩ Пропустить", callback_data=f"skip_task_{user_id}")]
     ]
-    
-    # Добавляем кнопку пропуска только для BotoHub и PiarFlow
-    if task_source in ["botohub", "piarflow"]:
-        keyboard.append([InlineKeyboardButton("⏩ Пропустить", callback_data=f"skip_task_{user_id}")])
-    
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    source_text = ""
-    if task_source == "custom":
-        source_text = f"📝 {task.get('name', 'Пользовательское задание')}\n"
     
     task_text = (
         f"📢 **Новое задание!** 📢\n\n"
-        f"{source_text}"
         f"🔗 **Ссылка:** {task_url}\n\n"
         f"💰 **Награда:** {task_price} {currency}\n\n"
         f"**Как выполнить:**\n"
         f"1️⃣ Нажмите «Перейти к заданию»\n"
-        f"2️⃣ Выполните действие\n"
+        f"2️⃣ Подпишитесь на канал\n"
         f"3️⃣ Вернитесь и нажмите «Проверить выполнение»\n\n"
+        f"⏱️ Время на выполнение: 3 минуты\n"
         f"✨ Удачи!"
     )
     
@@ -1353,7 +1475,7 @@ async def check_task_callback(update: Update, context: CallbackContext):
     task = db.current_task[user_id]
     task_source = task.get("source", "unknown")
     task_url = task.get("link", "")
-    task_price = task.get("price", settings.task_reward)
+    task_price = settings.task_reward
     currency = get_currency_symbol()
     
     await query.message.edit_text("🔍 **Проверяем выполнение задания...**\n\nПожалуйста, подождите...")
@@ -1361,17 +1483,7 @@ async def check_task_callback(update: Update, context: CallbackContext):
     try:
         task_completed = False
         
-        if task_source == "custom":
-            # Для пользовательских заданий считаем выполненным
-            task_completed = True
-            # Отмечаем задание как выполненное
-            user = get_user_data(user_id)
-            if "completed_custom_tasks" not in user:
-                user["completed_custom_tasks"] = []
-            if task.get("id") not in user["completed_custom_tasks"]:
-                user["completed_custom_tasks"].append(task.get("id"))
-                
-        elif task_source == "botohub":
+        if task_source == "botohub":
             result = await call_botohub_api(user_id, is_task=True, skip=False)
             prev_success = result.get("prev_success", False)
             
@@ -1412,10 +1524,10 @@ async def check_task_callback(update: Update, context: CallbackContext):
         else:
             await query.message.edit_text(
                 f"❌ **Вы ещё не выполнили задание!** ❌\n\n"
-                f"🔗 Пожалуйста, выполните действие:\n{task_url}\n\n"
+                f"🔗 Пожалуйста, подпишитесь:\n{task_url}\n\n"
                 f"**Инструкция:**\n"
                 f"1️⃣ Нажмите на ссылку выше\n"
-                f"2️⃣ Выполните действие\n"
+                f"2️⃣ Нажмите «Подписаться» или «Join»\n"
                 f"3️⃣ Вернитесь и нажмите «Проверить выполнение»\n\n"
                 f"⏱️ У вас есть 3 минуты на выполнение",
                 disable_web_page_preview=True
@@ -1423,11 +1535,9 @@ async def check_task_callback(update: Update, context: CallbackContext):
             
             keyboard = [
                 [InlineKeyboardButton("📎 Перейти к заданию", url=task_url)],
-                [InlineKeyboardButton("✅ Проверить выполнение", callback_data=f"check_task_{user_id}")]
+                [InlineKeyboardButton("✅ Проверить выполнение", callback_data=f"check_task_{user_id}")],
+                [InlineKeyboardButton("⏩ Пропустить", callback_data=f"skip_task_{user_id}")]
             ]
-            if task_source in ["botohub", "piarflow"]:
-                keyboard.append([InlineKeyboardButton("⏩ Пропустить", callback_data=f"skip_task_{user_id}")])
-            
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_reply_markup(reply_markup)
                 
@@ -1494,11 +1604,63 @@ async def next_task_callback(update: Update, context: CallbackContext):
     
     await query.message.edit_text("🔄 Получаем новое задание...")
     
-    # Очищаем текущее задание
-    if user_id in db.current_task:
-        db.current_task.pop(user_id, None)
+    botohub_task = None
+    piarflow_task = None
     
-    await tasks_mode(update, context)
+    try:
+        result = await call_botohub_api(user_id, is_task=True, skip=False)
+        tasks = result.get("tasks", [])
+        completed = result.get("completed", False)
+        skip_flag = result.get("skip", False)
+        
+        if not completed and not skip_flag and tasks:
+            if "completed_links" in user and tasks[0] in user["completed_links"]:
+                await call_botohub_api(user_id, is_task=True, skip=True)
+                result2 = await call_botohub_api(user_id, is_task=True, skip=False)
+                tasks2 = result2.get("tasks", [])
+                if tasks2 and tasks2[0] not in user.get("completed_links", []):
+                    botohub_task = {
+                        "link": tasks2[0],
+                        "source": "botohub"
+                    }
+            else:
+                botohub_task = {
+                    "link": tasks[0],
+                    "source": "botohub"
+                }
+    except Exception as e:
+        logger.error(f"Ошибка BotoHub: {e}")
+    
+    if not botohub_task:
+        try:
+            piarflow_tasks, msg_pf = await get_piarflow_tasks(user_id, query.message.chat.id)
+            if piarflow_tasks:
+                link = piarflow_tasks[0].get("link", "")
+                if "completed_links" in user and link not in user["completed_links"]:
+                    piarflow_task = {
+                        "link": link,
+                        "source": "piarflow",
+                        "original": piarflow_tasks[0]
+                    }
+        except Exception as e:
+            logger.error(f"Ошибка PiarFlow: {e}")
+    
+    if botohub_task:
+        task = botohub_task
+        db.current_task[user_id] = task
+        await show_task(update, context, task, user_id)
+    elif piarflow_task:
+        task = piarflow_task
+        db.current_task[user_id] = task
+        await show_task(update, context, task, user_id)
+    else:
+        await query.message.edit_text(
+            "🎉 **Нет активных заданий!**\n\n"
+            "Пожалуйста, зайдите позже.\n"
+            "В это время вы можете:\n"
+            "• Приглашать друзей 👥\n"
+            "• Получать ежедневный бонус 🏆"
+        )
 
 # ========== ВЫВОД СРЕДСТВ ==========
 async def withdraw_menu(update: Update, context: CallbackContext):
@@ -2221,8 +2383,8 @@ async def admin_panel(update: Update, context: CallbackContext):
         [InlineKeyboardButton("⚙️ Настройки бота", callback_data="admin_settings")],
         [InlineKeyboardButton("🎁 Призы топа", callback_data="admin_top_prizes")],
         [InlineKeyboardButton("🎯 Управление конкурсами", callback_data="admin_contests")],
+        [InlineKeyboardButton("📝 Кастомные задания", callback_data="admin_custom_tasks")],
         [InlineKeyboardButton("🔔 Уведомления", callback_data="admin_notifications")],
-        [InlineKeyboardButton("📝 Создать задание", callback_data="admin_create_task")],
         [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2241,123 +2403,56 @@ async def admin_panel(update: Update, context: CallbackContext):
         f"💰 Всего заработано: {format_number(db.global_stats['total_mcoins_earned'])} {currency}\n"
         f"✅ Заданий выполнено: {db.global_stats['total_tasks_completed']}\n"
         f"💸 Ожидают вывода: {pending_withdrawals}\n\n"
-        f"💰 **Текущая награда за задание:** {settings.task_reward} {currency}\n"
-        f"📝 **Пользовательских заданий:** {len(db.custom_tasks)}\n\n"
+        f"💰 **Текущая награда за задание:** {settings.task_reward} {currency}\n\n"
         f"Выберите действие:",
         reply_markup=reply_markup
     )
 
-# ========== АДМИН: СОЗДАНИЕ ЗАДАНИЯ ==========
-async def admin_create_task_callback(update: Update, context: CallbackContext):
+# ========== АДМИН: КАСТОМНЫЕ ЗАДАНИЯ ==========
+async def admin_custom_tasks_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
     
-    if query.from_user.id not in settings.admin_list:
-        await query.message.edit_text("⛔ Только для администратора!")
-        return
-    
-    context.user_data["task_step"] = "name"
-    
-    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_task_creation")]]
+    keyboard = [
+        [InlineKeyboardButton("📝 Создать задание", callback_data="create_custom_task")],
+        [InlineKeyboardButton("📋 Список заданий", callback_data="list_custom_tasks")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    active_tasks = len([t for t in db.custom_tasks.values() if t.get("active", False)])
+    
     await query.message.edit_text(
-        "📝 **Создание задания**\n\n"
-        "Введите название задания:",
+        f"📝 **Кастомные задания** 📝\n\n"
+        f"📊 Активных заданий: {active_tasks}\n"
+        f"📊 Всего заданий: {len(db.custom_tasks)}\n\n"
+        f"Выберите действие:",
         reply_markup=reply_markup
     )
 
-async def task_name_input(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    if user_id not in settings.admin_list:
-        return
-    
-    context.user_data["task_name"] = update.message.text
-    context.user_data["task_step"] = "link"
-    
-    await update.message.reply_text(
-        f"📝 Название: {context.user_data['task_name']}\n\n"
-        "Введите ссылку для задания:"
-    )
-
-async def task_link_input(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    if user_id not in settings.admin_list:
-        return
-    
-    context.user_data["task_link"] = update.message.text
-    context.user_data["task_step"] = "reward"
-    
-    currency = get_currency_symbol()
-    
-    await update.message.reply_text(
-        f"📝 Название: {context.user_data['task_name']}\n"
-        f"🔗 Ссылка: {context.user_data['task_link']}\n\n"
-        f"Введите награду за задание ({currency}):"
-    )
-
-async def task_reward_input(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    if user_id not in settings.admin_list:
-        return
-    
-    try:
-        reward = int(update.message.text)
-        if reward <= 0:
-            await update.message.reply_text("❌ Награда должна быть положительной!")
-            return
-        
-        task_id = len(db.custom_tasks) + 1
-        
-        db.custom_tasks.append({
-            "id": task_id,
-            "name": context.user_data["task_name"],
-            "link": context.user_data["task_link"],
-            "reward": reward,
-            "active": True,
-            "created_by": user_id,
-            "created_at": datetime.now().isoformat()
-        })
-        
-        db.save()
-        
-        context.user_data.pop("task_step", None)
-        context.user_data.pop("task_name", None)
-        context.user_data.pop("task_link", None)
-        context.user_data.pop("task_reward", None)
-        
-        currency = get_currency_symbol()
-        
-        await update.message.reply_text(
-            f"✅ **Задание создано!** 📝\n\n"
-            f"📝 Название: {db.custom_tasks[-1]['name']}\n"
-            f"🔗 Ссылка: {db.custom_tasks[-1]['link']}\n"
-            f"💰 Награда: {db.custom_tasks[-1]['reward']} {currency}\n\n"
-            f"Задание появится у пользователей."
-        )
-        
-        # Уведомляем всех пользователей
-        await broadcast_notification(
-            context,
-            f"📢 **Новое задание доступно!**\n\n"
-            f"📝 {db.custom_tasks[-1]['name']}\n"
-            f"💰 Награда: {db.custom_tasks[-1]['reward']} {currency}\n\n"
-            f"Нажмите «Задания», чтобы получить его!"
-        )
-        
-    except ValueError:
-        await update.message.reply_text("❌ Введите корректное число!")
-
-async def cancel_task_creation_callback(update: Update, context: CallbackContext):
+async def list_custom_tasks_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
     
-    context.user_data.pop("task_step", None)
-    context.user_data.pop("task_name", None)
-    context.user_data.pop("task_link", None)
-    context.user_data.pop("task_reward", None)
+    if not db.custom_tasks:
+        await query.message.edit_text("📭 Нет созданных заданий.")
+        return
     
-    await query.message.edit_text("❌ Создание задания отменено.")
+    text = "📋 **Список кастомных заданий**\n\n"
+    for tid, task in list(db.custom_tasks.items())[-10:]:
+        status = "🟢 Активно" if task.get("active", False) else "🔴 Неактивно"
+        completed = len(task.get("completed_by", []))
+        text += f"📝 {task.get('description', 'Без описания')[:30]}...\n"
+        text += f"   Статус: {status}\n"
+        text += f"   Выполнено: {completed} раз\n"
+        text += f"   Награда: {task.get('reward', 0)} {settings.currency_name}\n\n"
+    
+    keyboard = [
+        [InlineKeyboardButton("🔙 Назад", callback_data="admin_custom_tasks")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.edit_text(text, reply_markup=reply_markup)
 
 # ========== АДМИН: НАСТРОЙКА НАГРАД ==========
 async def admin_rewards_menu(update: Update, context: CallbackContext):
@@ -2818,8 +2913,7 @@ async def admin_stats_callback(update: Update, context: CallbackContext):
         f"✅ **Задания:**\n"
         f"• Всего выполнено: {total_tasks}\n"
         f"• В среднем на пользователя: {total_tasks // total_users if total_users > 0 else 0}\n"
-        f"💰 **Награда за задание:** {settings.task_reward} {currency}\n"
-        f"📝 **Пользовательских заданий:** {len(db.custom_tasks)}",
+        f"💰 **Награда за задание:** {settings.task_reward} {currency}",
         reply_markup=reply_markup
     )
 
@@ -3154,8 +3248,7 @@ async def admin_top_prizes_callback(update: Update, context: CallbackContext):
         f"🥇 1 место - {settings.top_prize_1} {currency}\n"
         f"🥈 2 место - {settings.top_prize_2} {currency}\n"
         f"🥉 3 место - {settings.top_prize_3} {currency}\n\n"
-        f"Нажмите на место для изменения приза.\n"
-        f"Или выдайте призы победителям.",
+        f"Нажмите на место для изменения приза.",
         reply_markup=reply_markup
     )
 
@@ -3170,10 +3263,11 @@ async def set_prize_callback(update: Update, context: CallbackContext):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     place_names = {"1": "1 место", "2": "2 место", "3": "3 место"}
+    currency = get_currency_symbol()
     
     await query.message.edit_text(
         f"📝 **Изменение приза для {place_names.get(place, '')}**\n\n"
-        f"Текущий приз: {getattr(settings, f'top_prize_{place}', 0)} {settings.currency_name}\n\n"
+        f"Текущий приз: {getattr(settings, f'top_prize_{place}', 0)} {currency}\n\n"
         f"Введите новую сумму приза:",
         reply_markup=reply_markup
     )
@@ -3280,7 +3374,7 @@ async def all_contests_callback(update: Update, context: CallbackContext):
     text = "📋 **Все конкурсы**\n\n"
     for cid, contest in list(db.contests.items())[-10:]:
         status = "🟢 Активен" if contest.get("active", False) else "🔴 Завершен"
-        type_emoji = "🏆" if contest["type"] == "top" else "🎯"
+        type_emoji = "📋" if contest["type"] in ["tasks", "achievement"] else "👥" if contest["type"] in ["referrals", "ref_achievement"] else "🎯"
         text += f"{type_emoji} {contest['name']} - {status}\n"
         text += f"   Участников: {len(contest.get('participants', []))}\n"
         text += f"   Приз: {contest['prize']} {settings.currency_name}\n\n"
@@ -3484,7 +3578,6 @@ async def handle_text(update: Update, context: CallbackContext):
         db.users[user_id]["first_name"] = update.effective_user.first_name
         db.save()
     
-    # Проверка шагов
     if context.user_data.get("withdraw_step") == "amount":
         await withdraw_amount_input(update, context)
         return
@@ -3509,14 +3602,14 @@ async def handle_text(update: Update, context: CallbackContext):
         await set_prize_input(update, context)
         return
     
-    if context.user_data.get("task_step") == "name":
-        await task_name_input(update, context)
+    if context.user_data.get("custom_task_step") == "link":
+        await custom_task_link_input(update, context)
         return
-    elif context.user_data.get("task_step") == "link":
-        await task_link_input(update, context)
+    elif context.user_data.get("custom_task_step") == "reward":
+        await custom_task_reward_input(update, context)
         return
-    elif context.user_data.get("task_step") == "reward":
-        await task_reward_input(update, context)
+    elif context.user_data.get("custom_task_step") == "description":
+        await custom_task_desc_input(update, context)
         return
     
     if context.user_data.get("contest_step") == "name":
@@ -3597,17 +3690,45 @@ async def cancel_mailing_callback(update: Update, context: CallbackContext):
     context.user_data.pop("mailing_step", None)
     await query.message.edit_text("✅ Рассылка отменена.")
 
+async def cancel_custom_task_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data.pop("custom_task_step", None)
+    context.user_data.pop("custom_task_link", None)
+    context.user_data.pop("custom_task_reward", None)
+    
+    await query.message.edit_text("❌ Создание задания отменено.")
+
 async def contests_menu_back(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
     
-    await contests_menu(update, context)
-
-async def admin_back(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
+    user_id = query.from_user.id
+    if user_id in settings.admin_list:
+        keyboard = [
+            [InlineKeyboardButton("➕ Создать конкурс", callback_data="create_contest")],
+            [InlineKeyboardButton("📋 Активные конкурсы", callback_data="active_contests")],
+            [InlineKeyboardButton("📊 Мои участия", callback_data="my_contests")],
+            [InlineKeyboardButton("🏆 Победители", callback_data="contest_winners")],
+            [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+    else:
+        keyboard = [
+            [InlineKeyboardButton("📋 Активные конкурсы", callback_data="active_contests")],
+            [InlineKeyboardButton("📊 Мои участия", callback_data="my_contests")],
+            [InlineKeyboardButton("🏆 Победители", callback_data="contest_winners")],
+            [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await admin_panel(update, context)
+    await query.message.edit_text(
+        "🎯 **Конкурсы** 🎯\n\n"
+        "Участвуйте в конкурсах и выигрывайте призы!\n"
+        "Выполняйте задания, приглашайте друзей и занимайте призовые места.",
+        reply_markup=reply_markup
+    )
 
 # ========== JOB QUEUE ==========
 async def notification_job(context: CallbackContext):
@@ -3634,6 +3755,7 @@ def main():
     app.add_handler(CallbackQueryHandler(skip_task_callback, pattern="^skip_task_"))
     app.add_handler(CallbackQueryHandler(next_task_callback, pattern="^next_task$"))
     app.add_handler(CallbackQueryHandler(get_task_callback, pattern="^get_task_"))
+    app.add_handler(CallbackQueryHandler(complete_custom_task_callback, pattern="^complete_custom_task_"))
     
     # Callback обработчики - АДМИН
     app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
@@ -3665,14 +3787,15 @@ def main():
     app.add_handler(CallbackQueryHandler(give_top_prizes_callback, pattern="^give_top_prizes$"))
     app.add_handler(CallbackQueryHandler(admin_contests_callback, pattern="^admin_contests$"))
     app.add_handler(CallbackQueryHandler(all_contests_callback, pattern="^all_contests$"))
+    app.add_handler(CallbackQueryHandler(admin_custom_tasks_callback, pattern="^admin_custom_tasks$"))
+    app.add_handler(CallbackQueryHandler(create_custom_task_callback, pattern="^create_custom_task$"))
+    app.add_handler(CallbackQueryHandler(list_custom_tasks_callback, pattern="^list_custom_tasks$"))
+    app.add_handler(CallbackQueryHandler(cancel_custom_task_callback, pattern="^cancel_custom_task$"))
     app.add_handler(CallbackQueryHandler(admin_notifications_callback, pattern="^admin_notifications$"))
     app.add_handler(CallbackQueryHandler(send_notification_all_callback, pattern="^send_notification_all$"))
     app.add_handler(CallbackQueryHandler(send_notification_user_callback, pattern="^send_notification_user$"))
     app.add_handler(CallbackQueryHandler(toggle_user_notify_callback, pattern="^toggle_user_notify$"))
     app.add_handler(CallbackQueryHandler(notify_stats_callback, pattern="^notify_stats$"))
-    app.add_handler(CallbackQueryHandler(admin_create_task_callback, pattern="^admin_create_task$"))
-    app.add_handler(CallbackQueryHandler(cancel_task_creation_callback, pattern="^cancel_task_creation$"))
-    app.add_handler(CallbackQueryHandler(admin_back, pattern="^admin_back$"))
     
     # Callback обработчики - РЕФЕРАЛЫ
     app.add_handler(CallbackQueryHandler(referrals_menu, pattern="^referrals_menu$"))
@@ -3730,9 +3853,9 @@ def main():
     print(f"📋 Задания выдаются по одному")
     print(f"💰 Награда за задание: {settings.task_reward} {settings.currency_name}")
     print(f"🏅 Топ пользователей с призами")
-    print(f"🎯 Конкурсы активны (2 типа)")
+    print(f"🎯 Конкурсы активны")
     print(f"🔔 Автоуведомления: {'Включены' if settings.auto_notify else 'Выключены'}")
-    print(f"📝 Пользовательские задания: {'Включены' if settings.custom_tasks_enabled else 'Выключены'}")
+    print(f"📝 Кастомные задания: {'Включены' if settings.custom_tasks_enabled else 'Выключены'}")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
