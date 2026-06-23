@@ -51,8 +51,7 @@ ADMIN_ID = 5356400377
  AWAITING_PRIZE_1, AWAITING_PRIZE_2, AWAITING_PRIZE_3,
  AWAITING_CUSTOM_TASK_LINK, AWAITING_CUSTOM_TASK_REWARD,
  AWAITING_USER_SEARCH, AWAITING_WITHDRAW_ID, AWAITING_CONFIRM_ACTION,
- AWAITING_PROMO_CODE, AWAITING_PROMO_REWARD, AWAITING_PROMO_LIMIT,
- AWAITING_CURRENCY_NAME, AWAITING_CURRENCY_EMOJI) = range(27)
+ AWAITING_PROMO_CODE, AWAITING_PROMO_REWARD, AWAITING_PROMO_LIMIT) = range(26)
 
 # Файлы для хранения данных
 DATA_FILE = "bot_data.json"
@@ -60,21 +59,16 @@ SETTINGS_FILE = "settings.json"
 
 # ========== ЭМОДЗИ ДЛЯ ВАЛЮТ ==========
 CURRENCY_EMOJIS = {
-    "🪙": "MCoin",
-    "💰": "Coin",
-    "🔮": "Token",
-    "⭐": "Star",
-    "💎": "Gem",
-    "🔷": "Crystal",
-    "🏅": "Gold",
-    "🥈": "Silver",
-    "🥉": "Bronze",
-    "💠": "Diamond",
-    "🪙": "Coin",
-    "🎖️": "Medal",
-    "💵": "Dollar",
-    "€": "Euro",
-    "£": "Pound"
+    "MCoin": "🪙",
+    "Coin": "💰",
+    "Token": "🔮",
+    "Star": "⭐",
+    "Gem": "💎",
+    "Crystal": "🔷",
+    "Gold": "🏅",
+    "Silver": "🥈",
+    "Bronze": "🥉",
+    "Diamond": "💠"
 }
 
 # ========== СТРУКТУРА ДАННЫХ ==========
@@ -102,8 +96,8 @@ class BotDatabase:
         self.last_notification: Dict[int, datetime] = {}
         self.contest_participants: Dict[int, List[int]] = {}
         self.custom_tasks: Dict[int, Dict] = {}
-        self.promocodes: Dict[str, Dict] = {}
-        self.used_promocodes: Dict[int, List[str]] = {}
+        self.promo_codes: Dict[str, Dict] = {}
+        self.used_promo: Dict[int, List[str]] = {}
         
     def save(self):
         data = {
@@ -123,8 +117,8 @@ class BotDatabase:
             "last_notification": self.last_notification,
             "contest_participants": self.contest_participants,
             "custom_tasks": self.custom_tasks,
-            "promocodes": self.promocodes,
-            "used_promocodes": self.used_promocodes
+            "promo_codes": self.promo_codes,
+            "used_promo": self.used_promo
         }
         try:
             with open(DATA_FILE, 'w', encoding='utf-8') as f:
@@ -154,8 +148,8 @@ class BotDatabase:
                     self.last_notification = {int(k): datetime.fromisoformat(v) for k, v in data.get("last_notification", {}).items()}
                     self.contest_participants = {int(k): v for k, v in data.get("contest_participants", {}).items()}
                     self.custom_tasks = {int(k): v for k, v in data.get("custom_tasks", {}).items()}
-                    self.promocodes = data.get("promocodes", {})
-                    self.used_promocodes = {int(k): v for k, v in data.get("used_promocodes", {}).items()}
+                    self.promo_codes = data.get("promo_codes", {})
+                    self.used_promo = {int(k): v for k, v in data.get("used_promo", {}).items()}
                 logger.info("Данные загружены")
             except Exception as e:
                 logger.error(f"Ошибка загрузки данных: {e}")
@@ -184,7 +178,6 @@ class BotSettings:
         self.notification_interval = 300
         self.contest_enabled = True
         self.auto_notify = True
-        self.promo_enabled = True
         
     def save(self):
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
@@ -270,6 +263,9 @@ def get_user_by_username(username: str) -> Optional[int]:
             return user_id
     return None
 
+def get_user_by_id(user_id: int) -> Optional[Dict]:
+    return db.users.get(user_id)
+
 def add_mcoins(user_id: int, amount: int, reason: str = "", source: str = "other") -> bool:
     if amount <= 0:
         return False
@@ -292,7 +288,7 @@ def add_mcoins(user_id: int, amount: int, reason: str = "", source: str = "other
         user["task_earned"] += amount
     elif source == "contest":
         user["contest_wins"] += 1
-    elif source == "promocode":
+    elif source == "promo":
         user["task_earned"] += amount
     
     db.global_stats["total_mcoins_earned"] += amount
@@ -338,14 +334,6 @@ def update_top_users(user_id: int):
     
     db.save()
 
-def generate_promo_code() -> str:
-    import string
-    chars = string.ascii_uppercase + string.digits
-    code = ''.join(random.choice(chars) for _ in range(8))
-    while code in db.promocodes:
-        code = ''.join(random.choice(chars) for _ in range(8))
-    return code
-
 # ========== УВЕДОМЛЕНИЯ ==========
 async def send_notification(context: CallbackContext, user_id: int, text: str, keyboard: Optional[InlineKeyboardMarkup] = None):
     try:
@@ -380,22 +368,55 @@ async def broadcast_notification(context: CallbackContext, text: str, keyboard: 
     logger.info(f"Рассылка уведомлений: отправлено {sent}, не доставлено {failed}")
     return sent, failed
 
+async def check_new_tasks(context: CallbackContext):
+    if not settings.auto_notify:
+        return
+    
+    for user_id in db.users.keys():
+        try:
+            result = await call_botohub_api(user_id, is_task=True, skip=False)
+            tasks = result.get("tasks", [])
+            
+            if tasks and not result.get("completed", False):
+                last_notif = db.last_notification.get(user_id)
+                if not last_notif or (datetime.now() - last_notif).seconds > settings.notification_interval:
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📋 Взять задание", callback_data=f"get_task_{user_id}")]
+                    ])
+                    currency = get_currency_symbol()
+                    await send_notification(
+                        context,
+                        user_id,
+                        f"📢 **Новое задание доступно!**\n\n"
+                        f"💰 Награда: {settings.task_reward} {currency}\n"
+                        f"Нажмите кнопку ниже, чтобы получить задание.",
+                        keyboard
+                    )
+                    db.last_notification[user_id] = datetime.now()
+                    db.save()
+        except:
+            pass
+
 # ========== ПРОМОКОДЫ ==========
 async def promo_menu(update: Update, context: CallbackContext):
-    if not settings.promo_enabled:
-        await update.message.reply_text("🎫 Промокоды временно недоступны!")
-        return
+    user_id = update.effective_user.id
+    currency = get_currency_symbol()
     
     keyboard = [
         [InlineKeyboardButton("🎫 Активировать промокод", callback_data="activate_promo")],
+        [InlineKeyboardButton("📋 Мои промокоды", callback_data="my_promos")],
         [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "🎫 **Промокоды** 🎫\n\n"
-        "Введите промокод для получения бонуса.\n\n"
-        "Промокоды можно получить у администратора.",
+        f"🎫 **Промокоды** 🎫\n\n"
+        f"Активируйте промокоды и получайте бонусные {currency}!\n\n"
+        f"**Как использовать:**\n"
+        f"1️⃣ Получите промокод\n"
+        f"2️⃣ Нажмите «Активировать промокод»\n"
+        f"3️⃣ Введите код\n\n"
+        f"Или перейдите по ссылке-промокоду:",
         reply_markup=reply_markup
     )
 
@@ -410,23 +431,27 @@ async def activate_promo_callback(update: Update, context: CallbackContext):
     
     await query.message.edit_text(
         "🎫 **Активация промокода**\n\n"
-        "Введите промокод:",
+        "Введите код промокода:",
         reply_markup=reply_markup
     )
 
 async def promo_code_input(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
-    code = update.message.text.upper().strip()
+    code = update.message.text.strip().upper()
     currency = get_currency_symbol()
     
-    if code not in db.promocodes:
+    if code not in db.promo_codes:
         await update.message.reply_text("❌ Неверный промокод!")
         context.user_data.pop("promo_step", None)
         return
     
-    promo = db.promocodes[code]
+    promo = db.promo_codes[code]
     
-    # Проверяем срок действия
+    if not promo.get("active", True):
+        await update.message.reply_text("❌ Промокод неактивен!")
+        context.user_data.pop("promo_step", None)
+        return
+    
     if promo.get("expiry"):
         expiry_date = datetime.fromisoformat(promo["expiry"])
         if datetime.now() > expiry_date:
@@ -434,36 +459,63 @@ async def promo_code_input(update: Update, context: CallbackContext):
             context.user_data.pop("promo_step", None)
             return
     
-    # Проверяем лимит использований
-    if promo.get("used_count", 0) >= promo.get("limit", 1):
-        await update.message.reply_text("❌ Промокод уже использован максимальное количество раз!")
-        context.user_data.pop("promo_step", None)
-        return
+    if user_id not in db.used_promo:
+        db.used_promo[user_id] = []
     
-    # Проверяем, использовал ли пользователь
-    if user_id in db.used_promocodes and code in db.used_promocodes[user_id]:
+    if code in db.used_promo[user_id]:
         await update.message.reply_text("❌ Вы уже использовали этот промокод!")
         context.user_data.pop("promo_step", None)
         return
     
-    # Начисляем награду
+    if len(promo.get("used_by", [])) >= promo.get("limit", 1):
+        await update.message.reply_text("❌ Промокод уже использован максимальное количество раз!")
+        context.user_data.pop("promo_step", None)
+        return
+    
     reward = promo.get("reward", 0)
-    add_mcoins(user_id, reward, f"promo_{code}", "promocode")
+    add_mcoins(user_id, reward, f"promo_{code}", "promo")
     
-    # Обновляем промокод
-    promo["used_count"] = promo.get("used_count", 0) + 1
-    if user_id not in db.used_promocodes:
-        db.used_promocodes[user_id] = []
-    db.used_promocodes[user_id].append(code)
-    
+    if "used_by" not in promo:
+        promo["used_by"] = []
+    promo["used_by"].append(user_id)
+    db.used_promo[user_id].append(code)
     db.save()
+    
     context.user_data.pop("promo_step", None)
     
     await update.message.reply_text(
         f"✅ **Промокод активирован!** 🎉\n\n"
         f"🎁 Вы получили: {reward} {currency}\n"
-        f"💰 Ваш баланс: {format_number(get_user_data(user_id)['mcoin'])} {currency}"
+        f"💰 Ваш баланс: {format_number(get_user_data(user_id)['mcoin'])} {currency}\n\n"
+        f"✨ Спасибо за использование бота!"
     )
+
+async def my_promos_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    used = db.used_promo.get(user_id, [])
+    
+    if not used:
+        await query.message.edit_text(
+            "📭 У вас нет активированных промокодов.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Назад", callback_data="promo_menu")]
+            ])
+        )
+        return
+    
+    text = "📋 **Ваши промокоды**\n\n"
+    for code in used:
+        promo = db.promo_codes.get(code, {})
+        reward = promo.get("reward", 0)
+        text += f"🎫 {code} - {reward} {settings.currency_name}\n"
+    
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="promo_menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.edit_text(text, reply_markup=reply_markup)
 
 async def cancel_promo_callback(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -632,7 +684,17 @@ async def tasks_mode(update: Update, context: CallbackContext):
         )
         return
     
-    # Проверяем кастомное задание
+    if user_id in db.current_task:
+        task = db.current_task[user_id]
+        await show_task(update, context, task, user_id)
+        return
+    
+    msg = await update.message.reply_text("🔄 Получаем задание...")
+    
+    botohub_task = None
+    piarflow_task = None
+    custom_task = None
+    
     if user_id in db.custom_tasks:
         custom_task = db.custom_tasks[user_id]
         if custom_task.get("active", False):
@@ -646,10 +708,6 @@ async def tasks_mode(update: Update, context: CallbackContext):
             await show_task(update, context, task, user_id)
             return
     
-    msg = await update.message.reply_text("🔄 Получаем задание...")
-    
-    # Пробуем BotoHub
-    botohub_task = None
     try:
         result = await call_botohub_api(user_id, is_task=True, skip=False)
         tasks = result.get("tasks", [])
@@ -659,14 +717,11 @@ async def tasks_mode(update: Update, context: CallbackContext):
         if not completed and not skip_flag and tasks:
             botohub_task = {
                 "link": tasks[0],
-                "source": "botohub",
-                "reward": settings.task_reward
+                "source": "botohub"
             }
     except Exception as e:
         logger.error(f"Ошибка BotoHub: {e}")
     
-    # Если нет BotoHub, пробуем PiarFlow
-    piarflow_task = None
     if not botohub_task:
         try:
             piarflow_tasks, msg_pf = await get_piarflow_tasks(user_id, update.message.chat.id)
@@ -674,7 +729,6 @@ async def tasks_mode(update: Update, context: CallbackContext):
                 piarflow_task = {
                     "link": piarflow_tasks[0].get("link", ""),
                     "source": "piarflow",
-                    "reward": settings.task_reward,
                     "original": piarflow_tasks[0]
                 }
         except Exception as e:
@@ -691,7 +745,10 @@ async def tasks_mode(update: Update, context: CallbackContext):
     else:
         await msg.edit_text(
             "🎉 **Нет активных заданий!**\n\n"
-            "Пожалуйста, зайдите позже."
+            "Пожалуйста, зайдите позже.\n"
+            "В это время вы можете:\n"
+            "• Приглашать друзей 👥\n"
+            "• Получать ежедневный бонус 🏆"
         )
 
 async def show_task(update: Update, context: CallbackContext, task: Dict, user_id: int):
@@ -785,7 +842,7 @@ async def check_task_callback(update: Update, context: CallbackContext):
             task_completed = True
         
         if task_completed:
-            add_mcoins(user_id, task_price, f"task_{task_url}", "task")
+            add_mcoins(user_id, task_price, f"task_{task_url}", "task" if task_source != "custom" else "custom")
             user = get_user_data(user_id)
             user["tasks_today"] += 1
             
@@ -898,7 +955,10 @@ async def next_task_callback(update: Update, context: CallbackContext):
     
     await query.message.edit_text("🔄 Получаем новое задание...")
     
-    # Проверяем кастомное задание
+    botohub_task = None
+    piarflow_task = None
+    custom_task = None
+    
     if user_id in db.custom_tasks:
         custom_task = db.custom_tasks[user_id]
         if custom_task.get("active", False):
@@ -912,7 +972,6 @@ async def next_task_callback(update: Update, context: CallbackContext):
             await show_task(update, context, task, user_id)
             return
     
-    botohub_task = None
     try:
         result = await call_botohub_api(user_id, is_task=True, skip=False)
         tasks = result.get("tasks", [])
@@ -927,19 +986,16 @@ async def next_task_callback(update: Update, context: CallbackContext):
                 if tasks2 and tasks2[0] not in user.get("completed_links", []):
                     botohub_task = {
                         "link": tasks2[0],
-                        "source": "botohub",
-                        "reward": settings.task_reward
+                        "source": "botohub"
                     }
             else:
                 botohub_task = {
                     "link": tasks[0],
-                    "source": "botohub",
-                    "reward": settings.task_reward
+                    "source": "botohub"
                 }
     except Exception as e:
         logger.error(f"Ошибка BotoHub: {e}")
     
-    piarflow_task = None
     if not botohub_task:
         try:
             piarflow_tasks, msg_pf = await get_piarflow_tasks(user_id, query.message.chat.id)
@@ -949,7 +1005,6 @@ async def next_task_callback(update: Update, context: CallbackContext):
                     piarflow_task = {
                         "link": link,
                         "source": "piarflow",
-                        "reward": settings.task_reward,
                         "original": piarflow_tasks[0]
                     }
         except Exception as e:
@@ -966,7 +1021,10 @@ async def next_task_callback(update: Update, context: CallbackContext):
     else:
         await query.message.edit_text(
             "🎉 **Нет активных заданий!**\n\n"
-            "Пожалуйста, зайдите позже."
+            "Пожалуйста, зайдите позже.\n"
+            "В это время вы можете:\n"
+            "• Приглашать друзей 👥\n"
+            "• Получать ежедневный бонус 🏆"
         )
 
 # ========== ВЫВОД СРЕДСТВ ==========
@@ -1668,7 +1726,8 @@ async def help_menu(update: Update, context: CallbackContext):
         "Участвуйте в конкурсах\n"
         "Выигрывайте ценные призы!\n\n"
         "**🎫 Промокоды:**\n"
-        "Активируйте промокоды для получения бонусов!\n\n"
+        "Активируйте промокоды\n"
+        "Получайте бонусные {currency}!\n\n"
         "По всем вопросам обращайтесь к администратору."
     )
     
@@ -1715,7 +1774,7 @@ async def create_contest_callback(update: Update, context: CallbackContext):
     
     await query.message.edit_text(
         "🎯 **Выбор типа конкурса** 🎯\n\n"
-        "🏆 **Кто больше (топовый)** - побеждают те, кто выполнит больше заданий\n"
+        "🏆 **Кто больше (топовый)** - побеждают те, кто выполнит больше заданий или пригласит больше друзей\n"
         "🎯 **Достижение цели** - победители те, кто первым достигнет цели\n\n"
         "Выберите тип конкурса:",
         reply_markup=reply_markup
@@ -1762,6 +1821,29 @@ async def contest_desc_input(update: Update, context: CallbackContext):
         return
     
     context.user_data["contest_desc"] = update.message.text
+    context.user_data["contest_step"] = "target_type"
+    
+    keyboard = [
+        [InlineKeyboardButton("📋 По заданиям", callback_data="contest_target_tasks")],
+        [InlineKeyboardButton("👥 По рефералам", callback_data="contest_target_referrals")],
+        [InlineKeyboardButton("🎯 По заданиям + рефералам", callback_data="contest_target_both")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel_contest")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"📝 Название: {context.user_data['contest_name']}\n"
+        f"📝 Описание: {context.user_data['contest_desc']}\n\n"
+        "Выберите по чему будет считаться конкурс:",
+        reply_markup=reply_markup
+    )
+
+async def contest_target_type_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    target_type = query.data.replace("contest_target_", "")
+    context.user_data["contest_target_type"] = target_type
     context.user_data["contest_step"] = "target_value"
     
     target_names = {
@@ -1770,10 +1852,11 @@ async def contest_desc_input(update: Update, context: CallbackContext):
         "both": "заданий + рефералов"
     }
     
-    await update.message.reply_text(
+    await query.message.edit_text(
         f"📝 Название: {context.user_data['contest_name']}\n"
-        f"📝 Описание: {context.user_data['contest_desc']}\n\n"
-        f"Введите количество для победы (например: 50):"
+        f"📝 Описание: {context.user_data['contest_desc']}\n"
+        f"📋 Тип: {target_names.get(target_type, '')}\n\n"
+        "Введите количество для победы (например: 50):"
     )
 
 async def contest_target_value_input(update: Update, context: CallbackContext):
@@ -1783,8 +1866,8 @@ async def contest_target_value_input(update: Update, context: CallbackContext):
     
     try:
         target_value = int(update.message.text)
-        if target_value <= 0:
-            await update.message.reply_text("❌ Значение должно быть положительным!")
+        if target_value < 0:
+            await update.message.reply_text("❌ Значение должно быть неотрицательным!")
             return
         
         context.user_data["contest_target_value"] = target_value
@@ -1845,6 +1928,7 @@ async def contest_duration_input(update: Update, context: CallbackContext):
             "description": context.user_data["contest_desc"],
             "prize": context.user_data["contest_prize"],
             "type": context.user_data["contest_type"],
+            "target_type": context.user_data["contest_target_type"],
             "target_value": context.user_data["contest_target_value"],
             "duration": duration,
             "start_date": now.isoformat(),
@@ -1866,6 +1950,7 @@ async def contest_duration_input(update: Update, context: CallbackContext):
         context.user_data.pop("contest_prize", None)
         context.user_data.pop("contest_duration", None)
         context.user_data.pop("contest_type", None)
+        context.user_data.pop("contest_target_type", None)
         context.user_data.pop("contest_target_value", None)
         
         type_names = {
@@ -1873,10 +1958,17 @@ async def contest_duration_input(update: Update, context: CallbackContext):
             "goal": "🎯 Достижение цели"
         }
         
+        target_names = {
+            "tasks": "задания",
+            "referrals": "рефералы",
+            "both": "задания + рефералы"
+        }
+        
         await update.message.reply_text(
             f"✅ **Конкурс создан!** 🎉\n\n"
             f"📝 Название: {db.contests[contest_id]['name']}\n"
             f"📝 Тип: {type_names.get(db.contests[contest_id]['type'], '')}\n"
+            f"📋 По: {target_names.get(db.contests[contest_id]['target_type'], '')}\n"
             f"🎯 Цель: {db.contests[contest_id]['target_value']}\n"
             f"💰 Приз: {db.contests[contest_id]['prize']} {settings.currency_name}\n"
             f"⏱️ Длительность: {duration} часов\n\n"
@@ -1889,6 +1981,7 @@ async def contest_duration_input(update: Update, context: CallbackContext):
             f"📝 {db.contests[contest_id]['name']}\n"
             f"{db.contests[contest_id]['description']}\n\n"
             f"📋 Тип: {type_names.get(db.contests[contest_id]['type'], '')}\n"
+            f"📋 По: {target_names.get(db.contests[contest_id]['target_type'], '')}\n"
             f"🎯 Цель: {db.contests[contest_id]['target_value']}\n"
             f"💰 Приз: {db.contests[contest_id]['prize']} {settings.currency_name}\n"
             f"⏱️ Длительность: {duration} часов\n\n"
@@ -1964,6 +2057,12 @@ async def contest_detail_callback(update: Update, context: CallbackContext):
         "goal": "🎯 Достижение цели"
     }
     
+    target_names = {
+        "tasks": "задания",
+        "referrals": "рефералы",
+        "both": "задания + рефералы"
+    }
+    
     keyboard = []
     if contest.get("active", False) and not is_participant:
         keyboard.append([InlineKeyboardButton("✅ Участвовать", callback_data=f"join_contest_{contest_id}")])
@@ -1978,6 +2077,7 @@ async def contest_detail_callback(update: Update, context: CallbackContext):
         f"🎯 **{contest['name']}**\n\n"
         f"📝 {contest['description']}\n\n"
         f"📋 Тип: {type_names.get(contest['type'], '')}\n"
+        f"📋 По: {target_names.get(contest['target_type'], '')}\n"
         f"🎯 Цель: {contest['target_value']}\n"
         f"💰 Приз: {contest['prize']} {currency}\n"
         f"👥 Участников: {len(contest.get('participants', []))}\n"
@@ -2017,7 +2117,7 @@ async def join_contest_callback(update: Update, context: CallbackContext):
         f"✅ **Вы участвуете в конкурсе!** 🎉\n\n"
         f"🎯 {contest['name']}\n"
         f"💰 Приз: {contest['prize']} {settings.currency_name}\n\n"
-        f"Выполняйте задания и занимайте топовые места!"
+        f"Выполняйте задания, приглашайте друзей и занимайте топовые места!"
     )
     
     await query.message.edit_reply_markup(None)
@@ -2057,7 +2157,13 @@ async def end_contest_callback(update: Update, context: CallbackContext):
     winners = []
     for uid in participants:
         user = get_user_data(uid)
-        score = user.get("monthly_tasks", 0)
+        
+        if contest["target_type"] == "tasks":
+            score = user.get("monthly_tasks", 0)
+        elif contest["target_type"] == "referrals":
+            score = len(user.get("referrals", []))
+        else:
+            score = user.get("monthly_tasks", 0) + len(user.get("referrals", []))
         
         winners.append({
             "user_id": uid,
@@ -2068,11 +2174,17 @@ async def end_contest_callback(update: Update, context: CallbackContext):
     
     winners.sort(key=lambda x: x["score"], reverse=True)
     
+    # Для конкурса "Кто больше" берем топ-3, для "Достижение цели" - только достигших цели
     if contest["type"] == "goal":
         target = contest.get("target_value", 0)
-        qualified_winners = [w for w in winners if w["score"] >= target]
-        winners = qualified_winners[:3]
+        if target > 0:
+            qualified_winners = [w for w in winners if w["score"] >= target]
+            winners = qualified_winners[:3]
+        else:
+            # Если цель 0, то все участники победили
+            winners = winners[:3]
     else:
+        # Кто больше - просто топ-3
         winners = winners[:3]
     
     if not winners:
@@ -2130,7 +2242,12 @@ async def end_contest_callback(update: Update, context: CallbackContext):
     for uid in participants:
         if uid not in [w["user_id"] for w in winners]:
             user = get_user_data(uid)
-            score = user.get("monthly_tasks", 0)
+            if contest["target_type"] == "tasks":
+                score = user.get("monthly_tasks", 0)
+            elif contest["target_type"] == "referrals":
+                score = len(user.get("referrals", []))
+            else:
+                score = user.get("monthly_tasks", 0) + len(user.get("referrals", []))
             
             await send_notification(
                 context,
@@ -2222,6 +2339,7 @@ async def cancel_contest_callback(update: Update, context: CallbackContext):
     context.user_data.pop("contest_prize", None)
     context.user_data.pop("contest_duration", None)
     context.user_data.pop("contest_type", None)
+    context.user_data.pop("contest_target_type", None)
     context.user_data.pop("contest_target_value", None)
     
     await query.message.edit_text("❌ Создание конкурса отменено.")
@@ -2245,7 +2363,7 @@ async def admin_panel(update: Update, context: CallbackContext):
         [InlineKeyboardButton("🎁 Призы топа", callback_data="admin_top_prizes")],
         [InlineKeyboardButton("🎯 Управление конкурсами", callback_data="admin_contests")],
         [InlineKeyboardButton("📋 Создать задание", callback_data="admin_create_task")],
-        [InlineKeyboardButton("🎫 Промокоды", callback_data="admin_promocodes")],
+        [InlineKeyboardButton("🎫 Промокоды", callback_data="admin_promo")],
         [InlineKeyboardButton("🔔 Уведомления", callback_data="admin_notifications")],
         [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
     ]
@@ -2754,8 +2872,8 @@ async def admin_withdrawals_callback(update: Update, context: CallbackContext):
     keyboard = []
     for req in pending_list[:10]:
         keyboard.append([
-            [InlineKeyboardButton(f"✅ {req['user_id']}", callback_data=f"confirm_{req['user_id']}")],
-            [InlineKeyboardButton(f"❌ {req['user_id']}", callback_data=f"reject_{req['user_id']}")]
+            InlineKeyboardButton(f"✅ Подтвердить {req['user_id']}", callback_data=f"confirm_{req['user_id']}"),
+            InlineKeyboardButton(f"❌ Отклонить {req['user_id']}", callback_data=f"reject_{req['user_id']}")
         ])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")])
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2994,18 +3112,18 @@ async def set_currency_callback(update: Update, context: CallbackContext):
     await query.answer()
     
     keyboard = []
-    for emoji, name in CURRENCY_EMOJIS.items():
+    for currency, emoji in CURRENCY_EMOJIS.items():
         keyboard.append([InlineKeyboardButton(
-            f"{emoji} {name}",
-            callback_data=f"currency_{emoji}_{name}"
+            f"{emoji} {currency}",
+            callback_data=f"currency_{currency}_{emoji}"
         )])
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel_setting")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.message.edit_text(
         f"💰 **Выбор валюты** 💰\n\n"
-        f"Текущая валюта: {settings.currency_emoji} {settings.currency_name}\n\n"
-        f"Выберите валюту и символ:",
+        f"Текущая валюта: {settings.currency_name} {settings.currency_emoji}\n\n"
+        f"Выберите новую валюту:",
         reply_markup=reply_markup
     )
 
@@ -3015,16 +3133,16 @@ async def set_currency_value(update: Update, context: CallbackContext):
     
     data = query.data.replace("currency_", "")
     parts = data.split("_")
-    emoji = parts[0]
-    name = "_".join(parts[1:])
+    currency = "_".join(parts[:-1])
+    emoji = parts[-1]
     
+    settings.currency_name = currency
     settings.currency_emoji = emoji
-    settings.currency_name = name
     settings.save()
     
     await query.message.edit_text(
         f"✅ **Валюта изменена!**\n\n"
-        f"💰 Новая валюта: {emoji} {name}"
+        f"💰 Новая валюта: {currency} {emoji}"
     )
 
 # ========== АДМИН: ПРИЗЫ ТОПА ==========
@@ -3275,13 +3393,10 @@ async def cancel_task_callback(update: Update, context: CallbackContext):
     await query.message.edit_text("❌ Создание задания отменено.")
 
 # ========== АДМИН: ПРОМОКОДЫ ==========
-async def admin_promocodes_callback(update: Update, context: CallbackContext):
+async def admin_promo_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
-    
-    if query.from_user.id not in settings.admin_list:
-        await query.message.edit_text("⛔ Только для администратора!")
-        return
+    currency = get_currency_symbol()
     
     keyboard = [
         [InlineKeyboardButton("➕ Создать промокод", callback_data="create_promo")],
@@ -3291,8 +3406,8 @@ async def admin_promocodes_callback(update: Update, context: CallbackContext):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.message.edit_text(
-        "🎫 **Управление промокодами** 🎫\n\n"
-        f"📊 Всего промокодов: {len(db.promocodes)}\n\n"
+        f"🎫 **Управление промокодами** 🎫\n\n"
+        f"📊 Всего промокодов: {len(db.promo_codes)}\n\n"
         f"Выберите действие:",
         reply_markup=reply_markup
     )
@@ -3305,104 +3420,137 @@ async def create_promo_callback(update: Update, context: CallbackContext):
         await query.message.edit_text("⛔ Только для администратора!")
         return
     
-    context.user_data["promo_step"] = "reward"
+    context.user_data["promo_step"] = "code"
     
-    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_promo")]]
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_promo_admin")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    currency = get_currency_symbol()
     
     await query.message.edit_text(
         "🎫 **Создание промокода**\n\n"
-        f"Введите сумму награды ({currency}):",
+        "Введите код промокода (латиница, цифры, без пробелов):",
         reply_markup=reply_markup
     )
 
-async def promo_reward_input(update: Update, context: CallbackContext):
+async def promo_code_create_input(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     if user_id not in settings.admin_list:
         return
     
-    try:
-        reward = int(update.message.text)
-        if reward <= 0:
-            await update.message.reply_text("❌ Награда должна быть положительной!")
-            return
-        
-        context.user_data["promo_reward"] = reward
-        context.user_data["promo_step"] = "limit"
-        
-        await update.message.reply_text(
-            f"💰 Награда: {reward} {settings.currency_name}\n\n"
-            "Введите лимит использований (например: 10):"
-        )
-    except ValueError:
-        await update.message.reply_text("❌ Введите корректное число!")
-
-async def promo_limit_input(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    if user_id not in settings.admin_list:
-        return
+    step = context.user_data.get("promo_step")
     
-    try:
-        limit = int(update.message.text)
-        if limit <= 0:
-            await update.message.reply_text("❌ Лимит должен быть положительным!")
+    if step == "code":
+        code = update.message.text.upper()
+        
+        if len(code) < 3:
+            await update.message.reply_text("❌ Код должен содержать минимум 3 символа!")
             return
         
-        reward = context.user_data["promo_reward"]
+        if code in db.promo_codes:
+            await update.message.reply_text("❌ Такой промокод уже существует!")
+            return
         
-        # Генерируем код
-        code = generate_promo_code()
-        
-        db.promocodes[code] = {
-            "reward": reward,
-            "limit": limit,
-            "used_count": 0,
-            "created_by": user_id,
-            "created_at": datetime.now().isoformat(),
-            "expiry": (datetime.now() + timedelta(days=30)).isoformat()
-        }
-        db.save()
-        
-        context.user_data.pop("promo_step", None)
-        context.user_data.pop("promo_reward", None)
+        context.user_data["promo_code"] = code
+        context.user_data["promo_step"] = "reward"
         
         currency = get_currency_symbol()
         
         await update.message.reply_text(
-            f"✅ **Промокод создан!** 🎉\n\n"
-            f"🎫 Код: `{code}`\n"
-            f"💰 Награда: {reward} {currency}\n"
-            f"📊 Лимит: {limit}\n"
-            f"⏱️ Срок: 30 дней\n\n"
-            f"Отправьте код пользователям для активации."
+            f"📝 Код: {code}\n\n"
+            f"Введите сумму награды ({currency}):"
         )
         
-    except ValueError:
-        await update.message.reply_text("❌ Введите корректное число!")
+    elif step == "reward":
+        try:
+            reward = int(update.message.text)
+            if reward <= 0:
+                await update.message.reply_text("❌ Сумма должна быть положительной!")
+                return
+            
+            context.user_data["promo_reward"] = reward
+            context.user_data["promo_step"] = "limit"
+            
+            await update.message.reply_text(
+                f"📝 Код: {context.user_data['promo_code']}\n"
+                f"💰 Награда: {reward} {settings.currency_name}\n\n"
+                "Введите лимит использований (например: 100):"
+            )
+            
+        except ValueError:
+            await update.message.reply_text("❌ Введите корректное число!")
+            
+    elif step == "limit":
+        try:
+            limit = int(update.message.text)
+            if limit <= 0:
+                await update.message.reply_text("❌ Лимит должен быть положительным!")
+                return
+            
+            code = context.user_data["promo_code"]
+            reward = context.user_data["promo_reward"]
+            
+            db.promo_codes[code] = {
+                "reward": reward,
+                "limit": limit,
+                "active": True,
+                "used_by": [],
+                "created_by": user_id,
+                "created_at": datetime.now().isoformat()
+            }
+            
+            db.save()
+            
+            context.user_data.pop("promo_code", None)
+            context.user_data.pop("promo_reward", None)
+            context.user_data.pop("promo_step", None)
+            
+            currency = get_currency_symbol()
+            
+            await update.message.reply_text(
+                f"✅ **Промокод создан!**\n\n"
+                f"🎫 Код: {code}\n"
+                f"💰 Награда: {reward} {currency}\n"
+                f"📊 Лимит: {limit} использований\n\n"
+                f"Отправьте код пользователям!\n"
+                f"Ссылка для активации: https://t.me/{context.bot.username}?start=promo_{code}"
+            )
+            
+        except ValueError:
+            await update.message.reply_text("❌ Введите корректное число!")
 
 async def list_promos_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
     
-    if not db.promocodes:
+    if not db.promo_codes:
         await query.message.edit_text("📭 Нет созданных промокодов.")
         return
     
     currency = get_currency_symbol()
-    text = "📋 **Список промокодов**\n\n"
+    text = "📋 **Список промокодов:**\n\n"
     
-    for code, promo in db.promocodes.items():
-        text += f"🎫 `{code}`\n"
+    for code, promo in db.promo_codes.items():
+        status = "🟢 Активен" if promo.get("active", True) else "🔴 Неактивен"
+        uses = len(promo.get("used_by", []))
+        limit = promo.get("limit", 1)
+        text += f"🎫 **{code}**\n"
         text += f"   💰 {promo['reward']} {currency}\n"
-        text += f"   📊 Использован: {promo.get('used_count', 0)}/{promo['limit']}\n"
-        text += f"   ⏱️ До: {promo['expiry'][:10]}\n\n"
+        text += f"   📊 Использован: {uses}/{limit}\n"
+        text += f"   📌 {status}\n\n"
     
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_promocodes")]]
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_promo")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.message.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    await query.message.edit_text(text, reply_markup=reply_markup)
+
+async def cancel_promo_admin_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data.pop("promo_code", None)
+    context.user_data.pop("promo_reward", None)
+    context.user_data.pop("promo_step", None)
+    
+    await query.message.edit_text("❌ Создание промокода отменено.")
 
 # ========== АДМИН: УВЕДОМЛЕНИЯ ==========
 async def admin_notifications_callback(update: Update, context: CallbackContext):
@@ -3503,6 +3651,7 @@ async def start(update: Update, context: CallbackContext):
         user_data["username"] = update.effective_user.username
         db.save()
     
+    # Обработка реферальной ссылки
     if context.args and context.args[0].startswith("ref_"):
         referrer_id = int(context.args[0].replace("ref_", ""))
         if referrer_id != user_id and referrer_id not in db.bans:
@@ -3526,6 +3675,43 @@ async def start(update: Update, context: CallbackContext):
                     )
                 except Exception as e:
                     logger.error(f"Не удалось отправить сообщение рефереру: {e}")
+    
+    # Обработка промокода из ссылки
+    if context.args and context.args[0].startswith("promo_"):
+        code = context.args[0].replace("promo_", "").upper()
+        
+        if code in db.promo_codes:
+            promo = db.promo_codes[code]
+            
+            if promo.get("active", True):
+                if user_id not in db.used_promo:
+                    db.used_promo[user_id] = []
+                
+                if code not in db.used_promo[user_id]:
+                    if len(promo.get("used_by", [])) < promo.get("limit", 1):
+                        reward = promo.get("reward", 0)
+                        add_mcoins(user_id, reward, f"promo_{code}", "promo")
+                        
+                        if "used_by" not in promo:
+                            promo["used_by"] = []
+                        promo["used_by"].append(user_id)
+                        db.used_promo[user_id].append(code)
+                        db.save()
+                        
+                        await update.message.reply_text(
+                            f"✅ **Промокод активирован!** 🎉\n\n"
+                            f"🎁 Вы получили: {reward} {currency}\n"
+                            f"💰 Ваш баланс: {format_number(get_user_data(user_id)['mcoin'])} {currency}\n\n"
+                            f"✨ Спасибо за использование бота!"
+                        )
+                    else:
+                        await update.message.reply_text("❌ Промокод уже использован максимальное количество раз!")
+                else:
+                    await update.message.reply_text("❌ Вы уже использовали этот промокод!")
+            else:
+                await update.message.reply_text("❌ Промокод неактивен!")
+        else:
+            await update.message.reply_text("❌ Неверный промокод!")
     
     passed, not_passed = await check_force_subs(user_id, context.bot)
     sub_text = ""
@@ -3630,13 +3816,11 @@ async def handle_text(update: Update, context: CallbackContext):
         await task_reward_input(update, context)
         return
     
-    if context.user_data.get("promo_step") == "reward":
-        await promo_reward_input(update, context)
+    if context.user_data.get("promo_step") in ["code", "reward", "limit"]:
+        await promo_code_create_input(update, context)
         return
-    elif context.user_data.get("promo_step") == "limit":
-        await promo_limit_input(update, context)
-        return
-    elif context.user_data.get("promo_step") == "code":
+    
+    if context.user_data.get("promo_step") == "code":
         await promo_code_input(update, context)
         return
     
@@ -3720,13 +3904,6 @@ async def cancel_mailing_callback(update: Update, context: CallbackContext):
     context.user_data.pop("mailing_step", None)
     await query.message.edit_text("✅ Рассылка отменена.")
 
-async def cancel_promo_callback(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    context.user_data.pop("promo_step", None)
-    context.user_data.pop("promo_reward", None)
-    await query.message.edit_text("✅ Создание промокода отменено.")
-
 async def contests_menu_back(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
@@ -3744,7 +3921,7 @@ async def contests_menu_back(update: Update, context: CallbackContext):
     await query.message.edit_text(
         "🎯 **Конкурсы** 🎯\n\n"
         "Участвуйте в конкурсах и выигрывайте призы!\n"
-        "Выполняйте задания и занимайте призовые места.",
+        "Выполняйте задания, приглашайте друзей и занимайте призовые места.",
         reply_markup=reply_markup
     )
 
@@ -3806,15 +3983,20 @@ def main():
     app.add_handler(CallbackQueryHandler(all_contests_callback, pattern="^all_contests$"))
     app.add_handler(CallbackQueryHandler(admin_create_task_callback, pattern="^admin_create_task$"))
     app.add_handler(CallbackQueryHandler(cancel_task_callback, pattern="^cancel_task$"))
-    app.add_handler(CallbackQueryHandler(admin_promocodes_callback, pattern="^admin_promocodes$"))
+    app.add_handler(CallbackQueryHandler(admin_promo_callback, pattern="^admin_promo$"))
     app.add_handler(CallbackQueryHandler(create_promo_callback, pattern="^create_promo$"))
     app.add_handler(CallbackQueryHandler(list_promos_callback, pattern="^list_promos$"))
+    app.add_handler(CallbackQueryHandler(cancel_promo_admin_callback, pattern="^cancel_promo_admin$"))
     app.add_handler(CallbackQueryHandler(admin_notifications_callback, pattern="^admin_notifications$"))
     app.add_handler(CallbackQueryHandler(send_notification_all_callback, pattern="^send_notification_all$"))
     app.add_handler(CallbackQueryHandler(send_notification_user_callback, pattern="^send_notification_user$"))
     app.add_handler(CallbackQueryHandler(toggle_user_notify_callback, pattern="^toggle_user_notify$"))
     app.add_handler(CallbackQueryHandler(notify_stats_callback, pattern="^notify_stats$"))
+    
+    # Callback обработчики - ПРОМОКОДЫ
+    app.add_handler(CallbackQueryHandler(promo_menu, pattern="^promo_menu$"))
     app.add_handler(CallbackQueryHandler(activate_promo_callback, pattern="^activate_promo$"))
+    app.add_handler(CallbackQueryHandler(my_promos_callback, pattern="^my_promos$"))
     app.add_handler(CallbackQueryHandler(cancel_promo_callback, pattern="^cancel_promo$"))
     
     # Callback обработчики - РЕФЕРАЛЫ
@@ -3845,6 +4027,7 @@ def main():
     app.add_handler(CallbackQueryHandler(contests_menu, pattern="^contests_menu$"))
     app.add_handler(CallbackQueryHandler(create_contest_callback, pattern="^create_contest$"))
     app.add_handler(CallbackQueryHandler(contest_type_callback, pattern="^contest_type_"))
+    app.add_handler(CallbackQueryHandler(contest_target_type_callback, pattern="^contest_target_"))
     app.add_handler(CallbackQueryHandler(active_contests_callback, pattern="^active_contests$"))
     app.add_handler(CallbackQueryHandler(contest_detail_callback, pattern="^contest_"))
     app.add_handler(CallbackQueryHandler(join_contest_callback, pattern="^join_contest_"))
@@ -3853,9 +4036,6 @@ def main():
     app.add_handler(CallbackQueryHandler(contest_winners_callback, pattern="^contest_winners$"))
     app.add_handler(CallbackQueryHandler(cancel_contest_callback, pattern="^cancel_contest$"))
     app.add_handler(CallbackQueryHandler(contests_menu_back, pattern="^contests_back$"))
-    
-    # Callback обработчики - ПРОМОКОДЫ
-    app.add_handler(CallbackQueryHandler(promo_menu, pattern="^promo_menu$"))
     
     # Callback обработчики - ОТМЕНА
     app.add_handler(CallbackQueryHandler(cancel_action_callback, pattern="^cancel_action$"))
