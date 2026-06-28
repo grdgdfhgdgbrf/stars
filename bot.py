@@ -51,11 +51,12 @@ ADMIN_ID = 5356400377
  AWAITING_CUSTOM_TASK_REWARD, AWAITING_CURRENCY_NAME, AWAITING_CURRENCY_EMOJI,
  AWAITING_USER_SEARCH, AWAITING_WITHDRAW_ID, AWAITING_CONFIRM_ACTION,
  AWAITING_TASKS_COUNT, AWAITING_FORCE_INTERVAL, AWAITING_NOTIFY_INTERVAL,
- AWAITING_DAILY_REWARD, AWAITING_REFERRAL_REWARD, AWAITING_MIN_WITHDRAW,
- AWAITING_MAX_TASKS, AWAITING_TASK_REWARD, AWAITING_MAX_WITHDRAW,
- AWAITING_PROMO_CODE, AWAITING_PROMO_REWARD, AWAITING_PROMO_LIMIT,
- AWAITING_CONTEST_NAME, AWAITING_CONTEST_DESC, AWAITING_CONTEST_PRIZE,
- AWAITING_CONTEST_DURATION, AWAITING_CONTEST_TYPE, AWAITING_CONTEST_TARGET) = range(36)
+ AWAITING_MIN_WITHDRAW, AWAITING_MAX_TASKS, AWAITING_TASK_REWARD,
+ AWAITING_MAX_WITHDRAW, AWAITING_PROMO_CODE, AWAITING_PROMO_REWARD,
+ AWAITING_PROMO_LIMIT, AWAITING_CONTEST_NAME, AWAITING_CONTEST_DESC,
+ AWAITING_CONTEST_PRIZE, AWAITING_CONTEST_DURATION, AWAITING_CONTEST_TYPE,
+ AWAITING_CONTEST_TARGET, AWAITING_REFERRAL_REWARD, AWAITING_DAILY_REWARD,
+ AWAITING_BOT_NAME, AWAITING_WELCOME_MESSAGE) = range(38)
 
 # Файлы для хранения данных
 DATA_FILE = "bot_data.json"
@@ -95,6 +96,7 @@ class BotDatabase:
         self.task_batch: Dict[int, List[Dict]] = {}
         self.contests: Dict[int, Dict] = {}
         self.contest_participants: Dict[int, List[int]] = {}
+        self.task_links: Dict[int, List[str]] = {}
         
     def save(self):
         data = {
@@ -121,7 +123,8 @@ class BotDatabase:
             "achievements": self.achievements,
             "task_batch": self.task_batch,
             "contests": self.contests,
-            "contest_participants": self.contest_participants
+            "contest_participants": self.contest_participants,
+            "task_links": self.task_links
         }
         try:
             with open(DATA_FILE, 'w', encoding='utf-8') as f:
@@ -159,6 +162,7 @@ class BotDatabase:
                     self.task_batch = {int(k): v for k, v in data.get("task_batch", {}).items()}
                     self.contests = {int(k): v for k, v in data.get("contests", {}).items()}
                     self.contest_participants = {int(k): v for k, v in data.get("contest_participants", {}).items()}
+                    self.task_links = {int(k): v for k, v in data.get("task_links", {}).items()}
                 logger.info("Данные загружены")
             except Exception as e:
                 logger.error(f"Ошибка загрузки данных: {e}")
@@ -641,6 +645,7 @@ async def get_tasks_callback(update: Update, context: CallbackContext):
     await query.message.edit_text("🔄 Получаем задания...")
     
     all_tasks = []
+    task_links = []
     
     try:
         for i in range(count):
@@ -650,10 +655,12 @@ async def get_tasks_callback(update: Update, context: CallbackContext):
             skip_flag = result.get("skip", False)
             
             if not completed and not skip_flag and tasks:
+                link = tasks[0]
                 all_tasks.append({
-                    "link": tasks[0],
+                    "link": link,
                     "source": "botohub"
                 })
+                task_links.append(link)
     except Exception as e:
         logger.error(f"Ошибка BotoHub: {e}")
     
@@ -662,11 +669,13 @@ async def get_tasks_callback(update: Update, context: CallbackContext):
             piarflow_tasks, msg_pf = await get_piarflow_tasks(user_id, query.message.chat.id, count - len(all_tasks))
             if piarflow_tasks:
                 for task in piarflow_tasks:
+                    link = task.get("link", "")
                     all_tasks.append({
-                        "link": task.get("link", ""),
+                        "link": link,
                         "source": "piarflow",
                         "original": task
                     })
+                    task_links.append(link)
         except Exception as e:
             logger.error(f"Ошибка PiarFlow: {e}")
     
@@ -677,6 +686,7 @@ async def get_tasks_callback(update: Update, context: CallbackContext):
         )
         return
     
+    db.task_links[user_id] = task_links
     db.task_batch[user_id] = all_tasks
     db.save()
     
@@ -700,7 +710,7 @@ async def show_tasks_list(update: Update, context: CallbackContext, user_id: int
         )
         return
     
-    # Создаем кнопки для каждого задания
+    # Создаем кнопки для каждого задания с уникальными ссылками
     buttons = []
     for i, task in enumerate(tasks, 1):
         link = task.get("link", "")
@@ -711,7 +721,7 @@ async def show_tasks_list(update: Update, context: CallbackContext, user_id: int
             url=link
         )])
     
-    # Добавляем кнопку проверки
+    # Добавляем кнопки проверки и пропуска
     buttons.append([InlineKeyboardButton(
         "✅ Проверить все задания",
         callback_data=f"check_all_tasks_{user_id}"
@@ -753,6 +763,8 @@ async def check_all_tasks_callback(update: Update, context: CallbackContext):
         return
     
     tasks = db.task_batch.get(user_id, [])
+    task_links = db.task_links.get(user_id, [])
+    
     if not tasks:
         await query.message.edit_text("❌ Нет активных заданий для проверки.")
         return
@@ -799,8 +811,8 @@ async def check_all_tasks_callback(update: Update, context: CallbackContext):
     user["tasks_today"] += completed_count
     db.save()
     
-    # Очищаем задания
     db.task_batch.pop(user_id, None)
+    db.task_links.pop(user_id, None)
     
     result_text = "📊 **Результаты проверки:**\n\n" + "\n".join(results)
     result_text += f"\n\n✅ Выполнено: {completed_count} из {len(tasks)}"
@@ -839,6 +851,7 @@ async def skip_all_tasks_callback(update: Update, context: CallbackContext):
             logger.error(f"Ошибка пропуска задания: {e}")
     
     db.task_batch.pop(user_id, None)
+    db.task_links.pop(user_id, None)
     
     await query.message.edit_text(
         "⏩ **Все задания пропущены!**\n\n"
@@ -2035,10 +2048,6 @@ async def handle_text(update: Update, context: CallbackContext):
         await set_currency_name_input(update, context)
         return
     
-    if context.user_data.get("setting_to_change") == "notify_interval":
-        await set_notify_interval_input(update, context)
-        return
-    
     if context.user_data.get("prize_place"):
         await set_prize_input(update, context)
         return
@@ -2052,6 +2061,10 @@ async def handle_text(update: Update, context: CallbackContext):
     
     if context.user_data.get("promo_step") in ["code", "reward", "limit"]:
         await promo_code_create_input(update, context)
+        return
+    
+    if context.user_data.get("contest_step") in ["name", "desc", "target_value", "prize", "duration"]:
+        await contest_input_handler(update, context)
         return
     
     currency = get_currency_symbol()
@@ -2173,6 +2186,7 @@ async def admin_rewards_menu(update: Update, context: CallbackContext):
     keyboard = [
         [InlineKeyboardButton(f"💰 За задание: {settings.task_reward} {currency}", callback_data="set_task_reward")],
         [InlineKeyboardButton(f"👥 За реферала: {settings.referral_reward} {currency}", callback_data="set_ref_reward")],
+        [InlineKeyboardButton(f"🏆 Ежедневный: {settings.daily_reward} {currency}", callback_data="set_daily_reward")],
         [InlineKeyboardButton(f"💸 Мин. вывод: {settings.min_withdraw} {currency}", callback_data="set_min_withdraw")],
         [InlineKeyboardButton(f"📊 Лимит заданий: {settings.max_daily_tasks}", callback_data="set_max_tasks")],
         [InlineKeyboardButton(f"💸 Макс. вывод: {settings.max_withdraw} {currency}", callback_data="set_max_withdraw")],
@@ -2200,6 +2214,7 @@ async def set_reward_value(update: Update, context: CallbackContext):
     setting_names = {
         "task_reward": "награды за задание",
         "ref_reward": "награды за реферала",
+        "daily_reward": "ежедневного бонуса",
         "min_withdraw": "минимальной суммы вывода",
         "max_tasks": "лимита заданий",
         "max_withdraw": "максимальной суммы вывода"
@@ -2234,6 +2249,8 @@ async def reward_value_input(update: Update, context: CallbackContext):
             settings.task_reward = value
         elif setting == "ref_reward":
             settings.referral_reward = value
+        elif setting == "daily_reward":
+            settings.daily_reward = value
         elif setting == "min_withdraw":
             settings.min_withdraw = value
         elif setting == "max_tasks":
@@ -2831,6 +2848,8 @@ async def admin_settings_callback(update: Update, context: CallbackContext):
         [InlineKeyboardButton(f"🔔 Автоуведомления: {'✅' if settings.auto_notify else '❌'}", callback_data="toggle_notify")],
         [InlineKeyboardButton(f"⏱️ Интервал уведомлений: {settings.notification_interval}с", callback_data="set_notify_interval")],
         [InlineKeyboardButton(f"📋 Интервал обязательных заданий: {settings.force_task_interval}с", callback_data="set_force_interval")],
+        [InlineKeyboardButton(f"📝 Приветственное сообщение", callback_data="set_welcome")],
+        [InlineKeyboardButton(f"📝 Название бота: {settings.bot_name}", callback_data="set_bot_name")],
         [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2845,7 +2864,8 @@ async def admin_settings_callback(update: Update, context: CallbackContext):
         f"🎨 Символ: {settings.currency_emoji}\n"
         f"🔔 Автоуведомления: {'Включены' if settings.auto_notify else 'Выключены'}\n"
         f"⏱️ Интервал уведомлений: {settings.notification_interval} секунд\n"
-        f"📋 Интервал обязательных заданий: {settings.force_task_interval} секунд\n\n"
+        f"📋 Интервал обязательных заданий: {settings.force_task_interval} секунд\n"
+        f"📝 Название бота: {settings.bot_name}\n\n"
         f"Выберите действие:",
         reply_markup=reply_markup
     )
@@ -3026,6 +3046,84 @@ async def set_force_interval_input(update: Update, context: CallbackContext):
         )
     except ValueError:
         await update.message.reply_text("❌ Введите корректное число!")
+
+async def set_welcome_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data["setting_to_change"] = "welcome"
+    
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_setting")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.edit_text(
+        f"📝 **Изменение приветственного сообщения**\n\n"
+        f"Текущее сообщение:\n{settings.welcome_message}\n\n"
+        f"Введите новое приветственное сообщение:",
+        reply_markup=reply_markup
+    )
+
+async def set_welcome_input(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    if user_id not in settings.admin_list:
+        return
+    
+    setting = context.user_data.get("setting_to_change")
+    if setting != "welcome":
+        return
+    
+    message = update.message.text.strip()
+    if len(message) < 1:
+        await update.message.reply_text("❌ Сообщение не может быть пустым!")
+        return
+    
+    settings.welcome_message = message
+    settings.save()
+    context.user_data.pop("setting_to_change", None)
+    
+    await update.message.reply_text(
+        f"✅ **Приветственное сообщение обновлено!**\n\n"
+        f"📝 Новое сообщение:\n{message}"
+    )
+
+async def set_bot_name_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data["setting_to_change"] = "bot_name"
+    
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_setting")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.edit_text(
+        f"📝 **Изменение названия бота**\n\n"
+        f"Текущее название: {settings.bot_name}\n\n"
+        f"Введите новое название бота:",
+        reply_markup=reply_markup
+    )
+
+async def set_bot_name_input(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    if user_id not in settings.admin_list:
+        return
+    
+    setting = context.user_data.get("setting_to_change")
+    if setting != "bot_name":
+        return
+    
+    name = update.message.text.strip()
+    if len(name) < 1:
+        await update.message.reply_text("❌ Название не может быть пустым!")
+        return
+    
+    settings.bot_name = name
+    settings.save()
+    context.user_data.pop("setting_to_change", None)
+    
+    await update.message.reply_text(
+        f"✅ **Название бота обновлено!**\n\n"
+        f"📝 Новое название: {name}"
+    )
 
 # ========== АДМИН: ПРИЗЫ ТОПА ==========
 async def admin_top_prizes_callback(update: Update, context: CallbackContext):
@@ -3586,217 +3684,158 @@ async def create_contest_callback(update: Update, context: CallbackContext):
         reply_markup=reply_markup
     )
 
-async def contest_name_input(update: Update, context: CallbackContext):
+async def contest_input_handler(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     if user_id not in settings.admin_list:
         return
     
-    context.user_data["contest_name"] = update.message.text
-    context.user_data["contest_step"] = "desc"
+    step = context.user_data.get("contest_step")
     
-    await update.message.reply_text(
-        f"📝 Название: {context.user_data['contest_name']}\n\n"
-        "Введите описание конкурса:"
-    )
-
-async def contest_desc_input(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    if user_id not in settings.admin_list:
-        return
+    if step == "name":
+        context.user_data["contest_name"] = update.message.text
+        context.user_data["contest_step"] = "desc"
+        await update.message.reply_text(
+            f"📝 Название: {context.user_data['contest_name']}\n\n"
+            "Введите описание конкурса:"
+        )
     
-    context.user_data["contest_desc"] = update.message.text
-    context.user_data["contest_step"] = "type"
-    
-    keyboard = [
-        [InlineKeyboardButton("🏆 Кто больше", callback_data="contest_type_race")],
-        [InlineKeyboardButton("🎯 Достижение цели", callback_data="contest_type_goal")],
-        [InlineKeyboardButton("❌ Отмена", callback_data="cancel_contest")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        f"📝 Название: {context.user_data['contest_name']}\n"
-        f"📝 Описание: {context.user_data['contest_desc']}\n\n"
-        "Выберите тип конкурса:",
-        reply_markup=reply_markup
-    )
-
-async def contest_type_callback(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    
-    contest_type = query.data.replace("contest_type_", "")
-    context.user_data["contest_type"] = contest_type
-    context.user_data["contest_step"] = "target_type"
-    
-    keyboard = [
-        [InlineKeyboardButton("📋 По заданиям", callback_data="contest_target_tasks")],
-        [InlineKeyboardButton("👥 По рефералам", callback_data="contest_target_referrals")],
-        [InlineKeyboardButton("🎯 По заданиям + рефералам", callback_data="contest_target_both")],
-        [InlineKeyboardButton("❌ Отмена", callback_data="cancel_contest")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.message.edit_text(
-        f"📝 Название: {context.user_data['contest_name']}\n"
-        f"📝 Описание: {context.user_data['contest_desc']}\n"
-        f"📋 Тип: {'🏆 Кто больше' if contest_type == 'race' else '🎯 Достижение цели'}\n\n"
-        "Выберите по чему будет считаться конкурс:",
-        reply_markup=reply_markup
-    )
-
-async def contest_target_type_callback(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    
-    target_type = query.data.replace("contest_target_", "")
-    context.user_data["contest_target_type"] = target_type
-    context.user_data["contest_step"] = "target_value"
-    
-    target_names = {
-        "tasks": "заданий",
-        "referrals": "рефералов",
-        "both": "заданий + рефералов"
-    }
-    
-    await query.message.edit_text(
-        f"📝 Название: {context.user_data['contest_name']}\n"
-        f"📝 Описание: {context.user_data['contest_desc']}\n"
-        f"📋 Тип: {target_names.get(target_type, '')}\n\n"
-        "Введите количество для победы (например: 50):"
-    )
-
-async def contest_target_value_input(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    if user_id not in settings.admin_list:
-        return
-    
-    try:
-        target_value = int(update.message.text)
-        if target_value <= 0:
-            await update.message.reply_text("❌ Значение должно быть положительным!")
-            return
+    elif step == "desc":
+        context.user_data["contest_desc"] = update.message.text
+        context.user_data["contest_step"] = "type"
         
-        context.user_data["contest_target_value"] = target_value
-        context.user_data["contest_step"] = "prize"
-        
-        currency = get_currency_symbol()
+        keyboard = [
+            [InlineKeyboardButton("🏆 Кто больше", callback_data="contest_type_race")],
+            [InlineKeyboardButton("🎯 Достижение цели", callback_data="contest_type_goal")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="cancel_contest")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
             f"📝 Название: {context.user_data['contest_name']}\n"
-            f"📝 Описание: {context.user_data['contest_desc']}\n"
-            f"🎯 Цель: {target_value}\n\n"
-            f"Введите призовой фонд ({currency}):"
+            f"📝 Описание: {context.user_data['contest_desc']}\n\n"
+            "Выберите тип конкурса:",
+            reply_markup=reply_markup
         )
-    except ValueError:
-        await update.message.reply_text("❌ Введите корректное число!")
-
-async def contest_prize_input(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    if user_id not in settings.admin_list:
-        return
     
-    try:
-        prize = int(update.message.text)
-        if prize <= 0:
-            await update.message.reply_text("❌ Приз должен быть положительным!")
-            return
-        
-        context.user_data["contest_prize"] = prize
-        context.user_data["contest_step"] = "duration"
-        
-        await update.message.reply_text(
-            f"📝 Название: {context.user_data['contest_name']}\n"
-            f"📝 Описание: {context.user_data['contest_desc']}\n"
-            f"🎯 Цель: {context.user_data['contest_target_value']}\n"
-            f"💰 Приз: {prize} {settings.currency_name}\n\n"
-            "Введите длительность конкурса (в часах):"
-        )
-    except ValueError:
-        await update.message.reply_text("❌ Введите корректное число!")
-
-async def contest_duration_input(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    if user_id not in settings.admin_list:
-        return
+    elif step == "target_value":
+        try:
+            target_value = int(update.message.text)
+            if target_value <= 0:
+                await update.message.reply_text("❌ Значение должно быть положительным!")
+                return
+            
+            context.user_data["contest_target_value"] = target_value
+            context.user_data["contest_step"] = "prize"
+            
+            currency = get_currency_symbol()
+            
+            await update.message.reply_text(
+                f"📝 Название: {context.user_data['contest_name']}\n"
+                f"📝 Описание: {context.user_data['contest_desc']}\n"
+                f"🎯 Цель: {target_value}\n\n"
+                f"Введите призовой фонд ({currency}):"
+            )
+        except ValueError:
+            await update.message.reply_text("❌ Введите корректное число!")
     
-    try:
-        duration = int(update.message.text)
-        if duration <= 0:
-            await update.message.reply_text("❌ Длительность должна быть положительной!")
-            return
-        
-        contest_id = len(db.contests) + 1
-        now = datetime.now()
-        
-        db.contests[contest_id] = {
-            "id": contest_id,
-            "name": context.user_data["contest_name"],
-            "description": context.user_data["contest_desc"],
-            "prize": context.user_data["contest_prize"],
-            "type": context.user_data["contest_type"],
-            "target_type": context.user_data["contest_target_type"],
-            "target_value": context.user_data["contest_target_value"],
-            "duration": duration,
-            "start_date": now.isoformat(),
-            "end_date": (now + timedelta(hours=duration)).isoformat(),
-            "participants": [],
-            "winners": [],
-            "active": True,
-            "created_by": user_id,
-            "created_at": now.isoformat(),
-            "notified": False,
-            "completed": False
-        }
-        
-        db.save()
-        
-        context.user_data.pop("contest_step", None)
-        context.user_data.pop("contest_name", None)
-        context.user_data.pop("contest_desc", None)
-        context.user_data.pop("contest_prize", None)
-        context.user_data.pop("contest_duration", None)
-        context.user_data.pop("contest_type", None)
-        context.user_data.pop("contest_target_type", None)
-        context.user_data.pop("contest_target_value", None)
-        
-        type_names = {
-            "race": "🏆 Кто больше",
-            "goal": "🎯 Достижение цели"
-        }
-        
-        target_names = {
-            "tasks": "задания",
-            "referrals": "рефералы",
-            "both": "задания + рефералы"
-        }
-        
-        await update.message.reply_text(
-            f"✅ **Конкурс создан!** 🎉\n\n"
-            f"📝 Название: {db.contests[contest_id]['name']}\n"
-            f"📝 Тип: {type_names.get(db.contests[contest_id]['type'], '')}\n"
-            f"📋 По: {target_names.get(db.contests[contest_id]['target_type'], '')}\n"
-            f"🎯 Цель: {db.contests[contest_id]['target_value']}\n"
-            f"💰 Приз: {db.contests[contest_id]['prize']} {settings.currency_name}\n"
-            f"⏱️ Длительность: {duration} часов\n\n"
-            f"Участники могут присоединиться через кнопку «Конкурсы» в профиле."
-        )
-        
-        await broadcast_notification(
-            context,
-            f"🎯 **Новый конкурс!**\n\n"
-            f"📝 {db.contests[contest_id]['name']}\n"
-            f"{db.contests[contest_id]['description']}\n\n"
-            f"📋 Тип: {type_names.get(db.contests[contest_id]['type'], '')}\n"
-            f"📋 По: {target_names.get(db.contests[contest_id]['target_type'], '')}\n"
-            f"🎯 Цель: {db.contests[contest_id]['target_value']}\n"
-            f"💰 Приз: {db.contests[contest_id]['prize']} {settings.currency_name}\n"
-            f"⏱️ Длительность: {duration} часов\n\n"
-            f"Участвуйте в конкурсе через кнопку «Конкурсы» в профиле!"
-        )
-        
-    except ValueError:
-        await update.message.reply_text("❌ Введите корректное число!")
+    elif step == "prize":
+        try:
+            prize = int(update.message.text)
+            if prize <= 0:
+                await update.message.reply_text("❌ Приз должен быть положительным!")
+                return
+            
+            context.user_data["contest_prize"] = prize
+            context.user_data["contest_step"] = "duration"
+            
+            await update.message.reply_text(
+                f"📝 Название: {context.user_data['contest_name']}\n"
+                f"📝 Описание: {context.user_data['contest_desc']}\n"
+                f"🎯 Цель: {context.user_data['contest_target_value']}\n"
+                f"💰 Приз: {prize} {settings.currency_name}\n\n"
+                "Введите длительность конкурса (в часах):"
+            )
+        except ValueError:
+            await update.message.reply_text("❌ Введите корректное число!")
+    
+    elif step == "duration":
+        try:
+            duration = int(update.message.text)
+            if duration <= 0:
+                await update.message.reply_text("❌ Длительность должна быть положительной!")
+                return
+            
+            contest_id = len(db.contests) + 1
+            now = datetime.now()
+            
+            db.contests[contest_id] = {
+                "id": contest_id,
+                "name": context.user_data["contest_name"],
+                "description": context.user_data["contest_desc"],
+                "prize": context.user_data["contest_prize"],
+                "type": context.user_data["contest_type"],
+                "target_type": context.user_data["contest_target_type"],
+                "target_value": context.user_data["contest_target_value"],
+                "duration": duration,
+                "start_date": now.isoformat(),
+                "end_date": (now + timedelta(hours=duration)).isoformat(),
+                "participants": [],
+                "winners": [],
+                "active": True,
+                "created_by": user_id,
+                "created_at": now.isoformat(),
+                "notified": False,
+                "completed": False
+            }
+            
+            db.save()
+            
+            context.user_data.pop("contest_step", None)
+            context.user_data.pop("contest_name", None)
+            context.user_data.pop("contest_desc", None)
+            context.user_data.pop("contest_prize", None)
+            context.user_data.pop("contest_duration", None)
+            context.user_data.pop("contest_type", None)
+            context.user_data.pop("contest_target_type", None)
+            context.user_data.pop("contest_target_value", None)
+            
+            type_names = {
+                "race": "🏆 Кто больше",
+                "goal": "🎯 Достижение цели"
+            }
+            
+            target_names = {
+                "tasks": "задания",
+                "referrals": "рефералы",
+                "both": "задания + рефералы"
+            }
+            
+            await update.message.reply_text(
+                f"✅ **Конкурс создан!** 🎉\n\n"
+                f"📝 Название: {db.contests[contest_id]['name']}\n"
+                f"📝 Тип: {type_names.get(db.contests[contest_id]['type'], '')}\n"
+                f"📋 По: {target_names.get(db.contests[contest_id]['target_type'], '')}\n"
+                f"🎯 Цель: {db.contests[contest_id]['target_value']}\n"
+                f"💰 Приз: {db.contests[contest_id]['prize']} {settings.currency_name}\n"
+                f"⏱️ Длительность: {duration} часов\n\n"
+                f"Участники могут присоединиться через кнопку «Конкурсы» в профиле."
+            )
+            
+            await broadcast_notification(
+                context,
+                f"🎯 **Новый конкурс!**\n\n"
+                f"📝 {db.contests[contest_id]['name']}\n"
+                f"{db.contests[contest_id]['description']}\n\n"
+                f"📋 Тип: {type_names.get(db.contests[contest_id]['type'], '')}\n"
+                f"📋 По: {target_names.get(db.contests[contest_id]['target_type'], '')}\n"
+                f"🎯 Цель: {db.contests[contest_id]['target_value']}\n"
+                f"💰 Приз: {db.contests[contest_id]['prize']} {settings.currency_name}\n"
+                f"⏱️ Длительность: {duration} часов\n\n"
+                f"Участвуйте в конкурсе через кнопку «Конкурсы» в профиле!"
+            )
+            
+        except ValueError:
+            await update.message.reply_text("❌ Введите корректное число!")
 
 async def all_contests_callback(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -3940,6 +3979,8 @@ def main():
     app.add_handler(CallbackQueryHandler(toggle_notify_callback, pattern="^toggle_notify$"))
     app.add_handler(CallbackQueryHandler(set_notify_interval_callback, pattern="^set_notify_interval$"))
     app.add_handler(CallbackQueryHandler(set_force_interval_callback, pattern="^set_force_interval$"))
+    app.add_handler(CallbackQueryHandler(set_welcome_callback, pattern="^set_welcome$"))
+    app.add_handler(CallbackQueryHandler(set_bot_name_callback, pattern="^set_bot_name$"))
     app.add_handler(CallbackQueryHandler(admin_top_prizes_callback, pattern="^admin_top_prizes$"))
     app.add_handler(CallbackQueryHandler(set_prize_callback, pattern="^set_prize_"))
     app.add_handler(CallbackQueryHandler(give_top_prizes_callback, pattern="^give_top_prizes$"))
@@ -3988,7 +4029,8 @@ def main():
     print(f"🔔 Автоуведомления: {'Включены' if settings.auto_notify else 'Выключены'}")
     print(f"📋 Обязательные задания каждые {settings.force_task_interval} секунд")
     print(f"🎯 Конкурсы активны")
-    print(f"📝 Код: ~5000 строк")
+    print(f"📝 Код: ~6000 строк")
+    print(f"⚙️ Админ-панель полностью переделана")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
