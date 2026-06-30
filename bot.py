@@ -41,6 +41,10 @@ BOTOHUB_API_URL = "https://botohub.me/get-tasks"
 PIARFLOW_API_KEY = "lCNi-V2kcnJoX9NjpOOtAOL9ee_0yyob"
 PIARFLOW_API_URL = "https://piarflow.com/v1"
 
+# Flyer API
+FLYER_API_KEY = "FL-kMgwjP-plEElI-rutLpT-UULXNI"
+FLYER_API_URL = "https://api.flyerhubs.com"
+
 ADMIN_ID = 5356400377
 
 # Состояния для ConversationHandler
@@ -94,6 +98,7 @@ class BotDatabase:
         self.contests: Dict[int, Dict] = {}
         self.contest_participants: Dict[int, List[int]] = {}
         self.unique_task_links: Dict[int, List[str]] = {}
+        self.flyer_tasks: Dict[int, List[Dict]] = {}
         
     def save(self):
         data = {
@@ -121,7 +126,8 @@ class BotDatabase:
             "task_batch": self.task_batch,
             "contests": self.contests,
             "contest_participants": self.contest_participants,
-            "unique_task_links": self.unique_task_links
+            "unique_task_links": self.unique_task_links,
+            "flyer_tasks": self.flyer_tasks
         }
         try:
             with open(DATA_FILE, 'w', encoding='utf-8') as f:
@@ -160,6 +166,7 @@ class BotDatabase:
                     self.contests = {int(k): v for k, v in data.get("contests", {}).items()}
                     self.contest_participants = {int(k): v for k, v in data.get("contest_participants", {}).items()}
                     self.unique_task_links = {int(k): v for k, v in data.get("unique_task_links", {}).items()}
+                    self.flyer_tasks = {int(k): v for k, v in data.get("flyer_tasks", {}).items()}
                 logger.info("Данные загружены")
             except Exception as e:
                 logger.error(f"Ошибка загрузки данных: {e}")
@@ -285,7 +292,7 @@ def add_mcoins(user_id: int, amount: int, reason: str = "", source: str = "other
     user["mcoin"] += amount
     user["total_earned"] += amount
     
-    if source in ["task", "botohub", "piarflow", "custom", "force"]:
+    if source in ["task", "botohub", "piarflow", "custom", "force", "flyer"]:
         user["task_earned"] += amount
         user["total_tasks_completed"] += 1
         user["monthly_tasks"] += 1
@@ -461,94 +468,62 @@ def get_subscription_links() -> str:
         links.append(f"https://t.me/{group}")
     return "\n".join(links)
 
-# ========== ИНТЕГРАЦИЯ BOTOHUB ==========
-async def call_botohub_api(chat_id: int, is_task: bool = False, skip: bool = False,
-                            gender: str = None, age: str = None) -> dict:
-    payload = {"chat_id": chat_id}
-    if is_task:
-        payload["is_task"] = True
-        if skip:
-            payload["skip"] = True
-    if gender:
-        payload["gender"] = gender
-    if age:
-        payload["age"] = age
-
+# ========== ИНТЕГРАЦИЯ FLYER API ==========
+async def call_flyer_api(method: str, payload: dict) -> dict:
     headers = {
-        "Content-Type": "application/json",
-        "Auth": BOTOHUB_TOKEN
-    }
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(BOTOHUB_API_URL, json=payload, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-                else:
-                    logger.error(f"BotoHub API ошибка: {resp.status}")
-                    return {"tasks": [], "completed": False, "skip": True}
-    except Exception as e:
-        logger.error(f"BotoHub API исключение: {e}")
-        return {"tasks": [], "completed": False, "skip": True}
-
-# ========== ИНТЕГРАЦИЯ PIARFLOW ==========
-async def call_piarflow_api(path: str, payload: dict) -> dict:
-    headers = {
-        "Authorization": f"Bearer {PIARFLOW_API_KEY}",
         "Content-Type": "application/json"
     }
     
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"{PIARFLOW_API_URL}{path}", 
+                f"{FLYER_API_URL}{method}", 
                 json=payload, 
                 headers=headers, 
                 timeout=15
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    if data.get("status") == "ok":
+                    if not data.get("error"):
                         return data
                     else:
-                        logger.error(f"PiarFlow API ошибка: {data}")
-                        return {"sponsors": [], "message": data.get("message", "Ошибка")}
+                        logger.error(f"Flyer API ошибка: {data}")
+                        return {"result": [], "error": data.get("error", "Ошибка")}
                 else:
                     error_text = await resp.text()
-                    logger.error(f"PiarFlow API ошибка {resp.status}: {error_text}")
-                    return {"sponsors": [], "message": f"Ошибка {resp.status}"}
+                    logger.error(f"Flyer API ошибка {resp.status}: {error_text}")
+                    return {"result": [], "error": f"Ошибка {resp.status}"}
     except Exception as e:
-        logger.error(f"PiarFlow API исключение: {e}")
-        return {"sponsors": [], "message": str(e)}
+        logger.error(f"Flyer API исключение: {e}")
+        return {"result": [], "error": str(e)}
 
-async def get_piarflow_tasks(user_id: int, chat_id: int, count: int = 1) -> Tuple[List[Dict], str]:
+async def get_flyer_tasks(user_id: int, limit: int = 5) -> Tuple[List[Dict], str]:
     payload = {
+        "key": FLYER_API_KEY,
         "user_id": user_id,
-        "chat_id": chat_id,
-        "max_sponsors": count
+        "limit": limit
     }
     
-    result = await call_piarflow_api("/sponsors", payload)
+    result = await call_flyer_api("/tasks", payload)
     
-    if result.get("status") == "ok":
-        sponsors = result.get("sponsors", [])
-        return sponsors, result.get("message", "OK")
+    if result.get("result") and not result.get("error"):
+        tasks = result.get("result", [])
+        return tasks, result.get("attached_at", 0)
     else:
-        return [], result.get("message", "Ошибка получения заданий")
+        return [], result.get("error", "Ошибка получения заданий")
 
-async def check_piarflow_tasks(user_id: int, links: List[str]) -> Tuple[List[Dict], str]:
+async def check_flyer_task(user_id: int, signature: str) -> Tuple[str, str]:
     payload = {
-        "user_id": user_id,
-        "links": links
+        "key": FLYER_API_KEY,
+        "signature": signature
     }
     
-    result = await call_piarflow_api("/sponsors/check", payload)
+    result = await call_flyer_api("/check", payload)
     
-    if result.get("status") == "ok":
-        sponsors = result.get("sponsors", [])
-        return sponsors, result.get("message", "OK")
+    if result.get("result") and not result.get("error"):
+        return result.get("result"), result.get("error")
     else:
-        return [], result.get("message", "Ошибка проверки")
+        return "error", result.get("error", "Ошибка проверки")
 
 # ========== ЗАДАНИЯ ==========
 async def tasks_mode(update: Update, context: CallbackContext):
@@ -682,6 +657,27 @@ async def get_tasks_callback(update: Update, context: CallbackContext):
         except Exception as e:
             logger.error(f"Ошибка PiarFlow: {e}")
     
+    # Если не хватает, пробуем Flyer API
+    if len(all_tasks) < count:
+        try:
+            flyer_tasks, attached_at = await get_flyer_tasks(user_id, count - len(all_tasks))
+            if flyer_tasks:
+                for task in flyer_tasks:
+                    link = task.get("links", [""])[0] if task.get("links") else ""
+                    if link and link not in unique_links:
+                        unique_links.add(link)
+                        all_tasks.append({
+                            "link": link,
+                            "source": "flyer",
+                            "signature": task.get("signature", ""),
+                            "task_id": task.get("resource_id", 0),
+                            "price": task.get("price", settings.task_reward),
+                            "name": task.get("name", "Задание"),
+                            "id": len(all_tasks) + 1
+                        })
+        except Exception as e:
+            logger.error(f"Ошибка Flyer API: {e}")
+    
     if not all_tasks:
         await query.message.edit_text(
             "🎉 **Нет активных заданий!**\n\n"
@@ -689,7 +685,6 @@ async def get_tasks_callback(update: Update, context: CallbackContext):
         )
         return
     
-    # Сохраняем уникальные ссылки
     db.unique_task_links[user_id] = list(unique_links)
     db.task_batch[user_id] = all_tasks
     db.save()
@@ -714,19 +709,16 @@ async def show_tasks_list(update: Update, context: CallbackContext, user_id: int
         )
         return
     
-    # Создаем кнопки для каждого задания с уникальными номерами
     buttons = []
     for i, task in enumerate(tasks, 1):
         link = task.get("link", "")
         task_id = task.get("id", i)
-        # Обрезаем ссылку для отображения
         display_link = link[:35] + "..." if len(link) > 35 else link
         buttons.append([InlineKeyboardButton(
             f"📎 Задание {task_id}: {display_link}",
             url=link
         )])
     
-    # Добавляем кнопку проверки
     buttons.append([InlineKeyboardButton(
         "✅ Проверить все задания",
         callback_data=f"check_all_tasks_{user_id}"
@@ -778,52 +770,51 @@ async def check_all_tasks_callback(update: Update, context: CallbackContext):
     total_reward = 0
     results = []
     
-    # Получаем все ссылки для проверки
-    links_to_check = [task.get("link", "") for task in tasks]
-    
-    try:
-        # Проверяем все задания через API
-        for i, task in enumerate(tasks, 1):
-            task_url = task.get("link", "")
-            task_source = task.get("source", "unknown")
-            task_price = task.get("reward", settings.task_reward)
+    for i, task in enumerate(tasks, 1):
+        task_url = task.get("link", "")
+        task_source = task.get("source", "unknown")
+        task_price = task.get("price", settings.task_reward)
+        
+        try:
+            task_completed = False
             
-            try:
-                task_completed = False
-                
-                if task_source == "botohub":
-                    result = await call_botohub_api(user_id, is_task=True, skip=False)
-                    prev_success = result.get("prev_success", False)
-                    if prev_success:
-                        task_completed = True
-                        
-                elif task_source == "piarflow":
-                    check_result, msg = await check_piarflow_tasks(user_id, [task_url])
-                    if check_result:
-                        all_subscribed = all(item.get("status") == "subscribed" for item in check_result)
-                        if all_subscribed:
-                            task_completed = True
-                
-                if task_completed:
-                    add_mcoins(user_id, task_price, f"task_{i}_{task_url}", "task")
-                    completed_count += 1
-                    total_reward += task_price
-                    results.append(f"✅ Задание {i} - выполнено (+{task_price} {currency})")
-                else:
-                    results.append(f"❌ Задание {i} - не выполнено")
+            if task_source == "botohub":
+                result = await call_botohub_api(user_id, is_task=True, skip=False)
+                prev_success = result.get("prev_success", False)
+                if prev_success:
+                    task_completed = True
                     
-            except Exception as e:
-                results.append(f"❌ Задание {i} - ошибка: {e}")
-    except Exception as e:
-        logger.error(f"Ошибка проверки заданий: {e}")
-        await query.message.edit_text(f"❌ Ошибка при проверке: {e}")
-        return
+            elif task_source == "piarflow":
+                check_result, msg = await check_piarflow_tasks(user_id, [task_url])
+                if check_result:
+                    all_subscribed = all(item.get("status") == "subscribed" for item in check_result)
+                    if all_subscribed:
+                        task_completed = True
+            
+            elif task_source == "flyer":
+                signature = task.get("signature", "")
+                if signature:
+                    status, error = await check_flyer_task(user_id, signature)
+                    if status == "success":
+                        task_completed = True
+                    else:
+                        results.append(f"❌ Задание {i} - {error}")
+            
+            if task_completed:
+                add_mcoins(user_id, task_price, f"task_{i}_{task_url}", "task" if task_source != "flyer" else "flyer")
+                completed_count += 1
+                total_reward += task_price
+                results.append(f"✅ Задание {i} - выполнено (+{task_price} {currency})")
+            else:
+                results.append(f"❌ Задание {i} - не выполнено")
+                
+        except Exception as e:
+            results.append(f"❌ Задание {i} - ошибка: {e}")
     
     user = get_user_data(user_id)
     user["tasks_today"] += completed_count
     db.save()
     
-    # Очищаем задания
     db.task_batch.pop(user_id, None)
     db.unique_task_links.pop(user_id, None)
     
@@ -3720,6 +3711,7 @@ def main():
     print(f"🔔 Автоуведомления: {'Включены' if settings.auto_notify else 'Выключены'}")
     print(f"📋 Обязательные задания каждые {settings.force_task_interval} секунд")
     print(f"🎯 Конкурсы активны")
+    print(f"🦅 Flyer API интегрирован")
     print(f"📝 Код: ~5000 строк")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
