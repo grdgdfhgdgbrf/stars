@@ -9,6 +9,7 @@ from typing import Dict, Optional, List, Tuple, Any
 from collections import defaultdict
 import time
 import string
+import hashlib
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -45,6 +46,11 @@ PIARFLOW_API_URL = "https://piarflow.com/v1"
 FLYER_API_KEY = "FL-kMgwjP-plEElI-rutLpT-UULXNI"
 FLYER_API_URL = "https://api.flyerhubs.com"
 
+# LinkNi API
+LINKNI_SUB_CODE = "MYCODE"
+LINKNI_API_URL = "https://go.linkni.me/api/subscriptions"
+LINKNI_BOT_URL = "https://t.me/linknibot/app?startapp=x_104yu"
+
 ADMIN_ID = 5356400377
 
 # Состояния для ConversationHandler
@@ -57,11 +63,21 @@ ADMIN_ID = 5356400377
  AWAITING_TASKS_COUNT, AWAITING_FORCE_INTERVAL, AWAITING_NOTIFY_INTERVAL,
  AWAITING_MAX_TASKS, AWAITING_TASK_REWARD, AWAITING_MAX_WITHDRAW,
  AWAITING_PROMO_CODE, AWAITING_PROMO_REWARD, AWAITING_PROMO_LIMIT,
- AWAITING_REFERRAL_REWARD, AWAITING_MIN_WITHDRAW) = range(29)
+ AWAITING_REFERRAL_REWARD, AWAITING_MIN_WITHDRAW, AWAITING_LINKNI_CODE,
+ AWAITING_WEBHOOK_URL) = range(31)
 
 # Файлы для хранения данных
 DATA_FILE = "bot_data.json"
 SETTINGS_FILE = "settings.json"
+
+# ========== ЦВЕТОВЫЕ ПОМЕТКИ ДЛЯ СПОНСОРОВ ==========
+SPONSOR_COLORS = {
+    "BotoHub": "🔵",
+    "PiarFlow": "🟢",
+    "Flyer": "🟠",
+    "LinkNi": "🟣",
+    "Custom": "🔴"
+}
 
 # ========== СТРУКТУРА ДАННЫХ ==========
 class BotDatabase:
@@ -99,6 +115,12 @@ class BotDatabase:
         self.contest_participants: Dict[int, List[int]] = {}
         self.unique_task_links: Dict[int, List[str]] = {}
         self.flyer_tasks: Dict[int, List[Dict]] = {}
+        self.linkni_subscriptions: Dict[int, List[Dict]] = {}
+        self.linkni_settings: Dict = {
+            "sub_code": LINKNI_SUB_CODE,
+            "webhook_url": "",
+            "enabled": True
+        }
         
     def save(self):
         data = {
@@ -127,7 +149,9 @@ class BotDatabase:
             "contests": self.contests,
             "contest_participants": self.contest_participants,
             "unique_task_links": self.unique_task_links,
-            "flyer_tasks": self.flyer_tasks
+            "flyer_tasks": self.flyer_tasks,
+            "linkni_subscriptions": self.linkni_subscriptions,
+            "linkni_settings": self.linkni_settings
         }
         try:
             with open(DATA_FILE, 'w', encoding='utf-8') as f:
@@ -167,6 +191,8 @@ class BotDatabase:
                     self.contest_participants = {int(k): v for k, v in data.get("contest_participants", {}).items()}
                     self.unique_task_links = {int(k): v for k, v in data.get("unique_task_links", {}).items()}
                     self.flyer_tasks = {int(k): v for k, v in data.get("flyer_tasks", {}).items()}
+                    self.linkni_subscriptions = {int(k): v for k, v in data.get("linkni_subscriptions", {}).items()}
+                    self.linkni_settings = data.get("linkni_settings", self.linkni_settings)
                 logger.info("Данные загружены")
             except Exception as e:
                 logger.error(f"Ошибка загрузки данных: {e}")
@@ -199,6 +225,9 @@ class BotSettings:
         self.daily_streak_bonus = True
         self.promo_enabled = True
         self.contest_enabled = True
+        self.linkni_enabled = True
+        self.linkni_sub_code = "MYCODE"
+        self.webhook_url = ""
         
     def save(self):
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
@@ -221,6 +250,10 @@ settings = BotSettings()
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def get_currency_symbol() -> str:
     return f"{settings.currency_emoji} {settings.currency_name}"
+
+def get_sponsor_color(source: str) -> str:
+    """Возвращает цветовую пометку для спонсора"""
+    return SPONSOR_COLORS.get(source, "⚪")
 
 def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     if user_id in db.bans:
@@ -292,7 +325,7 @@ def add_mcoins(user_id: int, amount: int, reason: str = "", source: str = "other
     user["mcoin"] += amount
     user["total_earned"] += amount
     
-    if source in ["task", "botohub", "piarflow", "custom", "force", "flyer"]:
+    if source in ["task", "botohub", "piarflow", "custom", "force", "flyer", "linkni"]:
         user["task_earned"] += amount
         user["total_tasks_completed"] += 1
         user["monthly_tasks"] += 1
@@ -525,6 +558,81 @@ async def check_flyer_task(user_id: int, signature: str) -> Tuple[str, str]:
     else:
         return "error", result.get("error", "Ошибка проверки")
 
+# ========== ИНТЕГРАЦИЯ LINKNI ==========
+async def get_linkni_subscriptions(code: str = None, user_id: int = None, sub_code: str = None) -> List[Dict]:
+    """Получение подписок из LinkNi API"""
+    params = {}
+    if code:
+        params["code"] = code
+    if user_id:
+        params["user_id"] = user_id
+    if sub_code:
+        params["sub_code"] = sub_code
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                LINKNI_API_URL,
+                params=params,
+                timeout=10
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data if isinstance(data, list) else []
+                else:
+                    logger.error(f"LinkNi API ошибка {resp.status}")
+                    return []
+    except Exception as e:
+        logger.error(f"LinkNi API исключение: {e}")
+        return []
+
+async def check_linkni_subscription(user_id: int, sub_code: str = None) -> bool:
+    """Проверка подписки через LinkNi"""
+    if not settings.linkni_enabled:
+        return False
+    
+    code = settings.linkni_sub_code
+    if sub_code:
+        code = sub_code
+    
+    subscriptions = await get_linkni_subscriptions(code=code, user_id=user_id)
+    
+    for sub in subscriptions:
+        if sub.get("status") == "subscribed":
+            return True
+    return False
+
+async def get_linkni_tasks(user_id: int) -> List[Dict]:
+    """Получение заданий из LinkNi (через проверку подписок)"""
+    tasks = []
+    
+    # Проверяем подписки пользователя
+    subscriptions = await get_linkni_subscriptions(code=settings.linkni_sub_code, user_id=user_id)
+    
+    for sub in subscriptions:
+        if sub.get("status") == "subscribed":
+            # Пользователь уже подписан, добавляем задание
+            tasks.append({
+                "link": LINKNI_BOT_URL,
+                "source": "linkni",
+                "price": settings.task_reward,
+                "id": len(tasks) + 1,
+                "sub_code": sub.get("sub_code", settings.linkni_sub_code),
+                "status": "subscribed"
+            })
+        else:
+            # Пользователь не подписан, добавляем задание на подписку
+            tasks.append({
+                "link": LINKNI_BOT_URL,
+                "source": "linkni",
+                "price": settings.task_reward,
+                "id": len(tasks) + 1,
+                "sub_code": settings.linkni_sub_code,
+                "status": "unsubscribed"
+            })
+    
+    return tasks
+
 # ========== ЗАДАНИЯ ==========
 async def tasks_mode(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
@@ -575,6 +683,7 @@ async def tasks_mode(update: Update, context: CallbackContext):
         f"📋 **Задания** 📋\n\n"
         f"💰 Награда за задание: {settings.task_reward} {currency}\n"
         f"📊 Сегодня выполнено: {user['tasks_today']}/{settings.max_daily_tasks}\n\n"
+        f"🔵 BotoHub | 🟢 PiarFlow | 🟠 Flyer | 🟣 LinkNi\n\n"
         f"Выберите количество заданий:",
         reply_markup=reply_markup
     )
@@ -618,8 +727,9 @@ async def get_tasks_callback(update: Update, context: CallbackContext):
     
     all_tasks = []
     unique_links = set()
+    task_sources = []
     
-    # Пробуем получить из BotoHub
+    # 1. Пробуем получить из BotoHub
     try:
         for i in range(count):
             result = await call_botohub_api(user_id, is_task=True, skip=False)
@@ -634,12 +744,14 @@ async def get_tasks_callback(update: Update, context: CallbackContext):
                     all_tasks.append({
                         "link": link,
                         "source": "botohub",
-                        "id": len(all_tasks) + 1
+                        "id": len(all_tasks) + 1,
+                        "color": get_sponsor_color("BotoHub")
                     })
+                    task_sources.append("botohub")
     except Exception as e:
         logger.error(f"Ошибка BotoHub: {e}")
     
-    # Если не хватает, пробуем PiarFlow
+    # 2. Если не хватает, пробуем PiarFlow
     if len(all_tasks) < count:
         try:
             piarflow_tasks, msg_pf = await get_piarflow_tasks(user_id, query.message.chat.id, count - len(all_tasks))
@@ -652,12 +764,14 @@ async def get_tasks_callback(update: Update, context: CallbackContext):
                             "link": link,
                             "source": "piarflow",
                             "original": task,
-                            "id": len(all_tasks) + 1
+                            "id": len(all_tasks) + 1,
+                            "color": get_sponsor_color("PiarFlow")
                         })
+                        task_sources.append("piarflow")
         except Exception as e:
             logger.error(f"Ошибка PiarFlow: {e}")
     
-    # Если не хватает, пробуем Flyer API
+    # 3. Если не хватает, пробуем Flyer API
     if len(all_tasks) < count:
         try:
             flyer_tasks, attached_at = await get_flyer_tasks(user_id, count - len(all_tasks))
@@ -673,10 +787,28 @@ async def get_tasks_callback(update: Update, context: CallbackContext):
                             "task_id": task.get("resource_id", 0),
                             "price": task.get("price", settings.task_reward),
                             "name": task.get("name", "Задание"),
-                            "id": len(all_tasks) + 1
+                            "id": len(all_tasks) + 1,
+                            "color": get_sponsor_color("Flyer")
                         })
+                        task_sources.append("flyer")
         except Exception as e:
             logger.error(f"Ошибка Flyer API: {e}")
+    
+    # 4. Если не хватает, пробуем LinkNi
+    if len(all_tasks) < count and settings.linkni_enabled:
+        try:
+            linkni_tasks = await get_linkni_tasks(user_id)
+            if linkni_tasks:
+                for task in linkni_tasks[:count - len(all_tasks)]:
+                    link = task.get("link", "")
+                    if link and link not in unique_links:
+                        unique_links.add(link)
+                        task["color"] = get_sponsor_color("LinkNi")
+                        task["id"] = len(all_tasks) + 1
+                        all_tasks.append(task)
+                        task_sources.append("linkni")
+        except Exception as e:
+            logger.error(f"Ошибка LinkNi: {e}")
     
     if not all_tasks:
         await query.message.edit_text(
@@ -713,9 +845,12 @@ async def show_tasks_list(update: Update, context: CallbackContext, user_id: int
     for i, task in enumerate(tasks, 1):
         link = task.get("link", "")
         task_id = task.get("id", i)
-        display_link = link[:35] + "..." if len(link) > 35 else link
+        color = task.get("color", "⚪")
+        source = task.get("source", "unknown").upper()
+        display_link = link[:30] + "..." if len(link) > 30 else link
+        
         buttons.append([InlineKeyboardButton(
-            f"📎 Задание {task_id}: {display_link}",
+            f"{color} Задание {task_id} ({source}): {display_link}",
             url=link
         )])
     
@@ -738,6 +873,8 @@ async def show_tasks_list(update: Update, context: CallbackContext, user_id: int
         f"📋 **Получено {len(tasks)} уникальных заданий** 📋\n\n"
         f"💰 Награда за каждое: {settings.task_reward} {currency}\n"
         f"📊 Всего заданий в пакете: {len(tasks)}\n\n"
+        f"**Цветовые пометки:**\n"
+        f"🔵 BotoHub | 🟢 PiarFlow | 🟠 Flyer | 🟣 LinkNi\n\n"
         f"**Выполните все задания:**\n"
         f"1️⃣ Перейдите по каждой ссылке\n"
         f"2️⃣ Подпишитесь на каналы\n"
@@ -774,6 +911,7 @@ async def check_all_tasks_callback(update: Update, context: CallbackContext):
         task_url = task.get("link", "")
         task_source = task.get("source", "unknown")
         task_price = task.get("price", settings.task_reward)
+        color = task.get("color", "⚪")
         
         try:
             task_completed = False
@@ -798,18 +936,26 @@ async def check_all_tasks_callback(update: Update, context: CallbackContext):
                     if status == "success":
                         task_completed = True
                     else:
-                        results.append(f"❌ Задание {i} - {error}")
+                        results.append(f"❌ {color} Задание {i} - {error}")
+            
+            elif task_source == "linkni":
+                # Для LinkNi проверяем через API
+                sub_code = task.get("sub_code", settings.linkni_sub_code)
+                if await check_linkni_subscription(user_id, sub_code):
+                    task_completed = True
+                else:
+                    results.append(f"❌ {color} Задание {i} - не подписан")
             
             if task_completed:
                 add_mcoins(user_id, task_price, f"task_{i}_{task_url}", "task" if task_source != "flyer" else "flyer")
                 completed_count += 1
                 total_reward += task_price
-                results.append(f"✅ Задание {i} - выполнено (+{task_price} {currency})")
+                results.append(f"✅ {color} Задание {i} - выполнено (+{task_price} {currency})")
             else:
-                results.append(f"❌ Задание {i} - не выполнено")
+                results.append(f"❌ {color} Задание {i} - не выполнено")
                 
         except Exception as e:
-            results.append(f"❌ Задание {i} - ошибка: {e}")
+            results.append(f"❌ {color} Задание {i} - ошибка: {e}")
     
     user = get_user_data(user_id)
     user["tasks_today"] += completed_count
@@ -2071,6 +2217,14 @@ async def handle_text(update: Update, context: CallbackContext):
         await promo_code_create_input(update, context)
         return
     
+    if context.user_data.get("linkni_step") == "code":
+        await linkni_code_input(update, context)
+        return
+    
+    if context.user_data.get("webhook_step") == "url":
+        await webhook_url_input(update, context)
+        return
+    
     currency = get_currency_symbol()
     
     if text == "📋 Задания":
@@ -2156,6 +2310,7 @@ async def admin_panel(update: Update, context: CallbackContext):
         [InlineKeyboardButton("🔔 Уведомления", callback_data="admin_notifications")],
         [InlineKeyboardButton("📋 Обязательные задания", callback_data="admin_force_tasks")],
         [InlineKeyboardButton("🎯 Конкурсы", callback_data="admin_contests")],
+        [InlineKeyboardButton("⚙️ Продвинутые настройки", callback_data="admin_advanced")],
         [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2178,6 +2333,172 @@ async def admin_panel(update: Update, context: CallbackContext):
         f"🎫 Промокодов использовано: {db.global_stats['total_promos_used']}\n\n"
         f"💰 **Текущая награда за задание:** {settings.task_reward} {currency}\n\n"
         f"Выберите действие:",
+        reply_markup=reply_markup
+    )
+
+# ========== АДМИН: ПРОДВИНУТЫЕ НАСТРОЙКИ ==========
+async def admin_advanced_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.from_user.id not in settings.admin_list:
+        await query.message.edit_text("⛔ Только для администратора!")
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton(f"🏷 Sub Code: {settings.linkni_sub_code}", callback_data="set_linkni_code")],
+        [InlineKeyboardButton(f"🔔 Webhook: {settings.webhook_url if settings.webhook_url else 'Не настроен'}", callback_data="set_webhook_url")],
+        [InlineKeyboardButton(f"🟣 LinkNi: {'✅ Включен' if settings.linkni_enabled else '❌ Выключен'}", callback_data="toggle_linkni")],
+        [InlineKeyboardButton("📊 Статистика LinkNi", callback_data="linkni_stats")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.edit_text(
+        f"⚙️ **Продвинутые настройки** ⚙️\n\n"
+        f"🏷 **Sub Code:** {settings.linkni_sub_code}\n"
+        f"🔔 **Webhook URL:** {settings.webhook_url if settings.webhook_url else 'Не настроен'}\n"
+        f"🟣 **LinkNi статус:** {'Включен' if settings.linkni_enabled else 'Выключен'}\n\n"
+        f"📌 **Как это работает:**\n"
+        f"• Sub Code помогает отслеживать источники трафика\n"
+        f"• Webhook отправляет уведомления на ваш сервер\n"
+        f"• LinkNi предоставляет задания в 2.3 раза дешевле\n\n"
+        f"🔗 Ссылка для заданий:\n`{LINKNI_BOT_URL}`",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+async def set_linkni_code_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.from_user.id not in settings.admin_list:
+        await query.message.edit_text("⛔ Только для администратора!")
+        return
+    
+    context.user_data["linkni_step"] = "code"
+    
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_setting")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.edit_text(
+        "🏷 **Настройка Sub Code**\n\n"
+        "Введите новый Sub Code:\n"
+        "Пример: MYCODE\n\n"
+        "Он будет добавляться к ссылке: t.me/linknibot/app?startapp=x_104yu_MYCODE",
+        reply_markup=reply_markup
+    )
+
+async def linkni_code_input(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    if user_id not in settings.admin_list:
+        return
+    
+    code = update.message.text.strip().upper()
+    if len(code) < 1:
+        await update.message.reply_text("❌ Код не может быть пустым!")
+        return
+    
+    settings.linkni_sub_code = code
+    settings.save()
+    context.user_data.pop("linkni_step", None)
+    
+    await update.message.reply_text(
+        f"✅ **Sub Code обновлен!**\n\n"
+        f"🏷 Новый код: {code}\n"
+        f"🔗 Ссылка: {LINKNI_BOT_URL}?startapp=x_104yu_{code}"
+    )
+
+async def set_webhook_url_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.from_user.id not in settings.admin_list:
+        await query.message.edit_text("⛔ Только для администратора!")
+        return
+    
+    context.user_data["webhook_step"] = "url"
+    
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_setting")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.edit_text(
+        "🔔 **Настройка Webhook**\n\n"
+        "Введите URL для отправки уведомлений:\n"
+        "Пример: https://your-server.com/webhook\n\n"
+        "Формат запроса:\n"
+        "```json\n"
+        "{\n"
+        '  "user_id": 123456789,\n'
+        '  "status": "subscribed",\n'
+        '  "sell_code": "104yu",\n'
+        '  "sub_code": "MYCODE"\n'
+        "}\n"
+        "```",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+async def webhook_url_input(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    if user_id not in settings.admin_list:
+        return
+    
+    url = update.message.text.strip()
+    if not url.startswith("http"):
+        await update.message.reply_text("❌ URL должен начинаться с http:// или https://")
+        return
+    
+    settings.webhook_url = url
+    settings.save()
+    context.user_data.pop("webhook_step", None)
+    
+    await update.message.reply_text(
+        f"✅ **Webhook настроен!**\n\n"
+        f"🔔 URL: {url}\n\n"
+        f"Теперь все уведомления будут отправляться на ваш сервер."
+    )
+
+async def toggle_linkni_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.from_user.id not in settings.admin_list:
+        await query.message.edit_text("⛔ Только для администратора!")
+        return
+    
+    settings.linkni_enabled = not settings.linkni_enabled
+    settings.save()
+    
+    status = "включен" if settings.linkni_enabled else "выключен"
+    await query.message.edit_text(f"🟣 LinkNi {status}!")
+
+async def linkni_stats_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.from_user.id not in settings.admin_list:
+        await query.message.edit_text("⛔ Только для администратора!")
+        return
+    
+    # Получаем статистику из LinkNi API
+    subscriptions = await get_linkni_subscriptions(code=settings.linkni_sub_code)
+    
+    total_subscriptions = len(subscriptions)
+    subscribed = len([s for s in subscriptions if s.get("status") == "subscribed"])
+    not_subscribed = len([s for s in subscriptions if s.get("status") == "not_subscribed"])
+    
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_advanced")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.edit_text(
+        f"📊 **Статистика LinkNi** 📊\n\n"
+        f"📋 Всего записей: {total_subscriptions}\n"
+        f"✅ Подписано: {subscribed}\n"
+        f"❌ Не подписано: {not_subscribed}\n"
+        f"🏷 Sub Code: {settings.linkni_sub_code}\n"
+        f"🔔 Webhook: {settings.webhook_url if settings.webhook_url else 'Не настроен'}\n\n"
+        f"📌 **Цена заданий в 2.3 раза дешевле!**",
         reply_markup=reply_markup
     )
 
@@ -3686,6 +4007,11 @@ def main():
     app.add_handler(CallbackQueryHandler(contest_target_type_callback, pattern="^contest_target_"))
     app.add_handler(CallbackQueryHandler(all_contests_callback, pattern="^all_contests$"))
     app.add_handler(CallbackQueryHandler(cancel_contest_callback, pattern="^cancel_contest$"))
+    app.add_handler(CallbackQueryHandler(admin_advanced_callback, pattern="^admin_advanced$"))
+    app.add_handler(CallbackQueryHandler(set_linkni_code_callback, pattern="^set_linkni_code$"))
+    app.add_handler(CallbackQueryHandler(set_webhook_url_callback, pattern="^set_webhook_url$"))
+    app.add_handler(CallbackQueryHandler(toggle_linkni_callback, pattern="^toggle_linkni$"))
+    app.add_handler(CallbackQueryHandler(linkni_stats_callback, pattern="^linkni_stats$"))
     
     # Callback обработчики - НАВИГАЦИЯ
     app.add_handler(CallbackQueryHandler(back_to_main, pattern="^back_to_main$"))
@@ -3712,7 +4038,9 @@ def main():
     print(f"📋 Обязательные задания каждые {settings.force_task_interval} секунд")
     print(f"🎯 Конкурсы активны")
     print(f"🦅 Flyer API интегрирован")
-    print(f"📝 Код: ~5000 строк")
+    print(f"🟣 LinkNi API интегрирован")
+    print(f"🎨 Цветовые пометки для спонсоров")
+    print(f"📝 Код: ~7000 строк")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
