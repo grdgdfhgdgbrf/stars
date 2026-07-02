@@ -64,7 +64,7 @@ ADMIN_ID = 5356400377
  AWAITING_MAX_TASKS, AWAITING_TASK_REWARD, AWAITING_MAX_WITHDRAW,
  AWAITING_PROMO_CODE, AWAITING_PROMO_REWARD, AWAITING_PROMO_LIMIT,
  AWAITING_REFERRAL_REWARD, AWAITING_MIN_WITHDRAW, AWAITING_LINKNI_CODE,
- AWAITING_WEBHOOK_URL) = range(31)
+ AWAITING_WEBHOOK_URL, AWAITING_FORCE_TASK_INTERVAL) = range(32)
 
 # Файлы для хранения данных
 DATA_FILE = "bot_data.json"
@@ -77,6 +77,34 @@ SPONSOR_COLORS = {
     "Flyer": "🟠",
     "LinkNi": "🟣",
     "Custom": "🔴"
+}
+
+# ========== ОБЯЗАТЕЛЬНЫЕ ПОДПИСКИ (СПОНСОРЫ) ==========
+FORCE_SUB_SPONSORS = {
+    "BotoHub": {
+        "name": "BotoHub",
+        "color": "🔵",
+        "link": "https://t.me/botohub",
+        "reward": 10
+    },
+    "PiarFlow": {
+        "name": "PiarFlow",
+        "color": "🟢",
+        "link": "https://t.me/piarflow",
+        "reward": 10
+    },
+    "Flyer": {
+        "name": "Flyer",
+        "color": "🟠",
+        "link": "https://t.me/flyerhubs",
+        "reward": 15
+    },
+    "LinkNi": {
+        "name": "LinkNi",
+        "color": "🟣",
+        "link": "https://t.me/linknibot",
+        "reward": 15
+    }
 }
 
 # ========== СТРУКТУРА ДАННЫХ ==========
@@ -96,7 +124,6 @@ class BotDatabase:
         }
         self.pending_checks: Dict[int, Dict] = {}
         self.current_task: Dict[int, Dict] = {}
-        self.task_queue: Dict[int, List[Dict]] = {}
         self.completed_tasks: Dict[int, List[str]] = {}
         self.top_users: Dict[int, Dict] = {}
         self.monthly_top: Dict[int, Dict] = {}
@@ -110,10 +137,8 @@ class BotDatabase:
         self.daily_claimed: Dict[int, datetime] = {}
         self.referral_stats: Dict[int, Dict] = {}
         self.achievements: Dict[int, List[str]] = {}
-        self.task_batch: Dict[int, List[Dict]] = {}
         self.contests: Dict[int, Dict] = {}
         self.contest_participants: Dict[int, List[int]] = {}
-        self.unique_task_links: Dict[int, List[str]] = {}
         self.flyer_tasks: Dict[int, List[Dict]] = {}
         self.linkni_subscriptions: Dict[int, List[Dict]] = {}
         self.linkni_settings: Dict = {
@@ -122,6 +147,7 @@ class BotDatabase:
             "enabled": True
         }
         self.active_tasks: Dict[int, Dict] = {}
+        self.sponsor_subscriptions: Dict[int, Dict] = {}
         
     def save(self):
         data = {
@@ -132,7 +158,6 @@ class BotDatabase:
             "global_stats": self.global_stats,
             "pending_checks": self.pending_checks,
             "current_task": self.current_task,
-            "task_queue": self.task_queue,
             "completed_tasks": self.completed_tasks,
             "top_users": self.top_users,
             "monthly_top": self.monthly_top,
@@ -146,14 +171,13 @@ class BotDatabase:
             "daily_claimed": self.daily_claimed,
             "referral_stats": self.referral_stats,
             "achievements": self.achievements,
-            "task_batch": self.task_batch,
             "contests": self.contests,
             "contest_participants": self.contest_participants,
-            "unique_task_links": self.unique_task_links,
             "flyer_tasks": self.flyer_tasks,
             "linkni_subscriptions": self.linkni_subscriptions,
             "linkni_settings": self.linkni_settings,
-            "active_tasks": self.active_tasks
+            "active_tasks": self.active_tasks,
+            "sponsor_subscriptions": self.sponsor_subscriptions
         }
         try:
             with open(DATA_FILE, 'w', encoding='utf-8') as f:
@@ -174,7 +198,6 @@ class BotDatabase:
                     self.global_stats = data.get("global_stats", self.global_stats)
                     self.pending_checks = {int(k): v for k, v in data.get("pending_checks", {}).items()}
                     self.current_task = {int(k): v for k, v in data.get("current_task", {}).items()}
-                    self.task_queue = {int(k): v for k, v in data.get("task_queue", {}).items()}
                     self.completed_tasks = {int(k): v for k, v in data.get("completed_tasks", {}).items()}
                     self.top_users = {int(k): v for k, v in data.get("top_users", {}).items()}
                     self.monthly_top = {int(k): v for k, v in data.get("monthly_top", {}).items()}
@@ -188,14 +211,13 @@ class BotDatabase:
                     self.daily_claimed = {int(k): datetime.fromisoformat(v) for k, v in data.get("daily_claimed", {}).items()}
                     self.referral_stats = {int(k): v for k, v in data.get("referral_stats", {}).items()}
                     self.achievements = {int(k): v for k, v in data.get("achievements", {}).items()}
-                    self.task_batch = {int(k): v for k, v in data.get("task_batch", {}).items()}
                     self.contests = {int(k): v for k, v in data.get("contests", {}).items()}
                     self.contest_participants = {int(k): v for k, v in data.get("contest_participants", {}).items()}
-                    self.unique_task_links = {int(k): v for k, v in data.get("unique_task_links", {}).items()}
                     self.flyer_tasks = {int(k): v for k, v in data.get("flyer_tasks", {}).items()}
                     self.linkni_subscriptions = {int(k): v for k, v in data.get("linkni_subscriptions", {}).items()}
                     self.linkni_settings = data.get("linkni_settings", self.linkni_settings)
                     self.active_tasks = {int(k): v for k, v in data.get("active_tasks", {}).items()}
+                    self.sponsor_subscriptions = {int(k): v for k, v in data.get("sponsor_subscriptions", {}).items()}
                 logger.info("Данные загружены")
             except Exception as e:
                 logger.error(f"Ошибка загрузки данных: {e}")
@@ -231,10 +253,12 @@ class BotSettings:
         self.linkni_enabled = True
         self.linkni_sub_code = "MYCODE"
         self.webhook_url = ""
+        self.force_sub_sponsors = []
         
     def save(self):
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
             json.dump(self.__dict__, f, ensure_ascii=False, indent=2)
+        logger.info("Настройки сохранены")
     
     def load(self):
         if os.path.exists(SETTINGS_FILE):
@@ -303,7 +327,8 @@ def get_user_data(user_id: int) -> Dict:
             "last_force_task": None,
             "promos_used": 0,
             "withdraw_count": 0,
-            "referral_count": 0
+            "referral_count": 0,
+            "sponsor_subscriptions": []
         }
         db.global_stats["total_users"] += 1
         db.save()
@@ -348,6 +373,8 @@ def add_mcoins(user_id: int, amount: int, reason: str = "", source: str = "other
     elif source == "daily":
         user["bonus_claims"] += 1
     elif source == "contest":
+        user["task_earned"] += amount
+    elif source == "sponsor_sub":
         user["task_earned"] += amount
     
     db.global_stats["total_mcoins_earned"] += amount
@@ -721,7 +748,6 @@ async def tasks_mode(update: Update, context: CallbackContext):
         )
         return
     
-    # Проверяем есть ли активное задание
     if user_id in db.active_tasks:
         task = db.active_tasks[user_id]
         await show_task(update, context, task, user_id)
@@ -822,7 +848,6 @@ async def get_linkni_tasks(user_id: int) -> List[Dict]:
                 "link": LINKNI_BOT_URL,
                 "source": "linkni",
                 "price": settings.task_reward,
-                "id": len(tasks) + 1,
                 "sub_code": sub.get("sub_code", settings.linkni_sub_code),
                 "status": "subscribed",
                 "color": get_sponsor_color("LinkNi")
@@ -832,7 +857,6 @@ async def get_linkni_tasks(user_id: int) -> List[Dict]:
                 "link": LINKNI_BOT_URL,
                 "source": "linkni",
                 "price": settings.task_reward,
-                "id": len(tasks) + 1,
                 "sub_code": settings.linkni_sub_code,
                 "status": "unsubscribed",
                 "color": get_sponsor_color("LinkNi")
@@ -946,7 +970,6 @@ async def check_task_callback(update: Update, context: CallbackContext):
             
             db.save()
             
-            # Удаляем активное задание
             db.active_tasks.pop(user_id, None)
             
             await query.message.edit_text(
@@ -997,7 +1020,6 @@ async def next_task_callback(update: Update, context: CallbackContext):
     
     user_id = query.from_user.id
     
-    # Проверяем лимит заданий
     user = get_user_data(user_id)
     today = datetime.now().date().isoformat()
     
@@ -1016,7 +1038,7 @@ async def next_task_callback(update: Update, context: CallbackContext):
     
     await query.message.edit_text("🔄 Получаем новое задание...")
     
-    # Пробуем получить задание из BotoHub
+    # Обновляем задание - пробуем получить новое
     try:
         result = await call_botohub_api(user_id, is_task=True, skip=False)
         tasks = result.get("tasks", [])
@@ -1036,7 +1058,6 @@ async def next_task_callback(update: Update, context: CallbackContext):
     except Exception as e:
         logger.error(f"Ошибка BotoHub: {e}")
     
-    # Если нет, пробуем PiarFlow
     try:
         piarflow_tasks, msg_pf = await get_piarflow_tasks(user_id, query.message.chat.id)
         if piarflow_tasks:
@@ -1054,7 +1075,6 @@ async def next_task_callback(update: Update, context: CallbackContext):
     except Exception as e:
         logger.error(f"Ошибка PiarFlow: {e}")
     
-    # Если нет, пробуем Flyer API
     try:
         flyer_tasks, attached_at = await get_flyer_tasks(user_id)
         if flyer_tasks:
@@ -1076,7 +1096,6 @@ async def next_task_callback(update: Update, context: CallbackContext):
     except Exception as e:
         logger.error(f"Ошибка Flyer API: {e}")
     
-    # Если нет, пробуем LinkNi
     if settings.linkni_enabled:
         try:
             linkni_tasks = await get_linkni_tasks(user_id)
@@ -1094,6 +1113,152 @@ async def next_task_callback(update: Update, context: CallbackContext):
         "🎉 **Нет активных заданий!**\n\n"
         "Пожалуйста, зайдите позже."
     )
+
+# ========== ОБЯЗАТЕЛЬНЫЕ ПОДПИСКИ ОТ СПОНСОРОВ ==========
+async def check_sponsor_subs(user_id: int, context: CallbackContext) -> Tuple[bool, List[Dict]]:
+    """Проверяет обязательные подписки на спонсоров"""
+    not_subscribed = []
+    
+    for sponsor_key, sponsor_data in FORCE_SUB_SPONSORS.items():
+        if sponsor_key not in settings.force_sub_sponsors:
+            continue
+        
+        # Проверяем подписку через API
+        if sponsor_key == "BotoHub":
+            # Проверяем через BotoHub API
+            try:
+                result = await call_botohub_api(user_id, is_task=True, skip=False)
+                if result.get("skip", True):
+                    not_subscribed.append(sponsor_data)
+            except:
+                not_subscribed.append(sponsor_data)
+        elif sponsor_key == "PiarFlow":
+            # Проверяем через PiarFlow API
+            try:
+                sponsors, msg = await get_piarflow_tasks(user_id, 0)
+                if not sponsors:
+                    not_subscribed.append(sponsor_data)
+            except:
+                not_subscribed.append(sponsor_data)
+        elif sponsor_key == "Flyer":
+            # Проверяем через Flyer API
+            try:
+                tasks, attached = await get_flyer_tasks(user_id)
+                if not tasks:
+                    not_subscribed.append(sponsor_data)
+            except:
+                not_subscribed.append(sponsor_data)
+        elif sponsor_key == "LinkNi":
+            # Проверяем через LinkNi API
+            try:
+                if not await check_linkni_subscription(user_id):
+                    not_subscribed.append(sponsor_data)
+            except:
+                not_subscribed.append(sponsor_data)
+    
+    return len(not_subscribed) == 0, not_subscribed
+
+async def show_sponsor_subs(update: Update, context: CallbackContext):
+    """Показывает обязательные подписки на спонсоров"""
+    user_id = update.effective_user.id
+    
+    passed, not_passed = await check_sponsor_subs(user_id, context)
+    
+    if passed:
+        await update.message.reply_text(
+            "✅ **Все обязательные подписки выполнены!**\n\n"
+            "Вы можете приступать к выполнению заданий."
+        )
+        return
+    
+    msg = "⚠️ **Для выполнения заданий необходимо подписаться на спонсоров:**\n\n"
+    keyboard = []
+    
+    for sponsor in not_passed:
+        color = sponsor.get("color", "⚪")
+        name = sponsor.get("name", "Неизвестно")
+        link = sponsor.get("link", "")
+        reward = sponsor.get("reward", 10)
+        
+        msg += f"{color} **{name}**\n"
+        msg += f"🔗 Ссылка: {link}\n"
+        msg += f"💰 Награда: {reward} {settings.currency_name}\n\n"
+        
+        keyboard.append([InlineKeyboardButton(
+            f"{color} Подписаться на {name}",
+            url=link
+        )])
+    
+    keyboard.append([InlineKeyboardButton(
+        "✅ Проверить подписки",
+        callback_data="check_sponsor_subs"
+    )])
+    keyboard.append([InlineKeyboardButton(
+        "🔙 Назад",
+        callback_data="back_to_main"
+    )])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(msg, reply_markup=reply_markup, disable_web_page_preview=True)
+
+async def check_sponsor_subs_callback(update: Update, context: CallbackContext):
+    """Проверка подписок на спонсоров"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    await query.message.edit_text("🔍 **Проверяем подписки на спонсоров...**")
+    
+    passed, not_passed = await check_sponsor_subs(user_id, context)
+    
+    if passed:
+        # Начисляем награду за подписки
+        reward = 0
+        for sponsor_key in settings.force_sub_sponsors:
+            if sponsor_key in FORCE_SUB_SPONSORS:
+                reward += FORCE_SUB_SPONSORS[sponsor_key]["reward"]
+        
+        if reward > 0:
+            add_mcoins(user_id, reward, "sponsor_subscriptions", "sponsor_sub")
+        
+        await query.message.edit_text(
+            f"✅ **Все обязательные подписки выполнены!** 🎉\n\n"
+            f"💰 Вы получили награду: {reward} {settings.currency_name}\n"
+            f"💰 Ваш баланс: {format_number(get_user_data(user_id)['mcoin'])} {settings.currency_name}\n\n"
+            f"Теперь вы можете выполнять задания!",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📋 Перейти к заданиям", callback_data="next_task")],
+                [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
+            ])
+        )
+        return
+    
+    msg = "⚠️ **Не все обязательные подписки выполнены:**\n\n"
+    keyboard = []
+    
+    for sponsor in not_passed:
+        color = sponsor.get("color", "⚪")
+        name = sponsor.get("name", "Неизвестно")
+        link = sponsor.get("link", "")
+        
+        msg += f"{color} **{name}**\n"
+        msg += f"🔗 Ссылка: {link}\n\n"
+        
+        keyboard.append([InlineKeyboardButton(
+            f"{color} Подписаться на {name}",
+            url=link
+        )])
+    
+    keyboard.append([InlineKeyboardButton(
+        "✅ Проверить подписки",
+        callback_data="check_sponsor_subs"
+    )])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.edit_text(msg, reply_markup=reply_markup, disable_web_page_preview=True)
 
 # ========== ОБЯЗАТЕЛЬНЫЕ ЗАДАНИЯ ==========
 async def force_task_job(context: CallbackContext):
@@ -1581,6 +1746,7 @@ async def profile_menu(update: Update, context: CallbackContext):
         [InlineKeyboardButton("🎯 Конкурсы", callback_data="contests_menu")],
         [InlineKeyboardButton("💸 Вывод средств", callback_data="withdraw_menu")],
         [InlineKeyboardButton("🔔 Настройки уведомлений", callback_data="notify_settings")],
+        [InlineKeyboardButton("📋 Обязательные подписки", callback_data="sponsor_subs")],
         [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1825,6 +1991,13 @@ async def toggle_notify_user_callback(update: Update, context: CallbackContext):
             [InlineKeyboardButton("🔙 Назад", callback_data="notify_settings")]
         ])
     )
+
+async def sponsor_subs_callback(update: Update, context: CallbackContext):
+    """Показывает обязательные подписки на спонсоров"""
+    query = update.callback_query
+    await query.answer()
+    
+    await show_sponsor_subs(update, context)
 
 # ========== ВЫВОД СРЕДСТВ ==========
 async def withdraw_menu_profile(update: Update, context: CallbackContext):
@@ -2280,6 +2453,10 @@ async def handle_text(update: Update, context: CallbackContext):
         await set_notify_interval_input(update, context)
         return
     
+    if context.user_data.get("setting_to_change") == "force_task_interval":
+        await set_force_task_interval_input(update, context)
+        return
+    
     if context.user_data.get("prize_place"):
         await set_prize_input(update, context)
         return
@@ -2514,16 +2691,82 @@ async def admin_forcesub_menu(update: Update, context: CallbackContext):
         [InlineKeyboardButton("➕ Добавить группу", callback_data="add_group")],
         [InlineKeyboardButton("🗑 Удалить канал", callback_data="remove_channel")],
         [InlineKeyboardButton("🗑 Удалить группу", callback_data="remove_group")],
+        [InlineKeyboardButton("🎯 Обязательные спонсоры", callback_data="admin_sponsors")],
         [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    sponsors_text = "\n".join([f"• {FORCE_SUB_SPONSORS[s]['color']} {s}" for s in settings.force_sub_sponsors]) or "Нет спонсоров"
     
     await query.message.edit_text(
         f"📢 **Обязательные подписки** 📢\n\n"
         f"📺 **Каналы:**\n{channels_text}\n\n"
         f"👥 **Группы:**\n{groups_text}\n\n"
+        f"🎯 **Спонсоры:**\n{sponsors_text}\n\n"
         f"Выберите действие:",
         reply_markup=reply_markup
+    )
+
+async def admin_sponsors_menu(update: Update, context: CallbackContext):
+    """Управление обязательными спонсорами"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.from_user.id not in settings.admin_list:
+        await query.message.edit_text("⛔ Только для администратора!")
+        return
+    
+    keyboard = []
+    for sponsor_key, sponsor_data in FORCE_SUB_SPONSORS.items():
+        is_active = sponsor_key in settings.force_sub_sponsors
+        status = "✅" if is_active else "❌"
+        color = sponsor_data.get("color", "⚪")
+        name = sponsor_data.get("name", sponsor_key)
+        
+        keyboard.append([InlineKeyboardButton(
+            f"{color} {name} {status}",
+            callback_data=f"toggle_sponsor_{sponsor_key}"
+        )])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_forcesub")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.edit_text(
+        f"🎯 **Управление обязательными спонсорами**\n\n"
+        f"Выберите спонсоров, подписка на которых обязательна:\n\n"
+        f"✅ - активен\n"
+        f"❌ - неактивен\n\n"
+        f"💰 За подписку на каждого спонсора начисляется награда.",
+        reply_markup=reply_markup
+    )
+
+async def toggle_sponsor_callback(update: Update, context: CallbackContext):
+    """Включение/выключение спонсора"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.from_user.id not in settings.admin_list:
+        await query.message.edit_text("⛔ Только для администратора!")
+        return
+    
+    sponsor_key = query.data.replace("toggle_sponsor_", "")
+    
+    if sponsor_key in settings.force_sub_sponsors:
+        settings.force_sub_sponsors.remove(sponsor_key)
+        status = "выключен"
+    else:
+        settings.force_sub_sponsors.append(sponsor_key)
+        status = "включен"
+    
+    settings.save()
+    
+    sponsor_name = FORCE_SUB_SPONSORS.get(sponsor_key, {}).get("name", sponsor_key)
+    await query.message.edit_text(
+        f"✅ Спонсор {sponsor_name} {status}!\n\n"
+        f"Нажмите «Назад» для продолжения.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Назад", callback_data="admin_sponsors")]
+        ])
     )
 
 async def add_force_sub_callback(update: Update, context: CallbackContext):
@@ -3190,7 +3433,7 @@ async def set_notify_interval_input(update: Update, context: CallbackContext):
 async def set_force_interval_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
-    context.user_data["setting_to_change"] = "force_interval"
+    context.user_data["setting_to_change"] = "force_task_interval"
     keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_setting")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.message.edit_text(
@@ -3198,12 +3441,12 @@ async def set_force_interval_callback(update: Update, context: CallbackContext):
         reply_markup=reply_markup
     )
 
-async def set_force_interval_input(update: Update, context: CallbackContext):
+async def set_force_task_interval_input(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     if user_id not in settings.admin_list:
         return
     setting = context.user_data.get("setting_to_change")
-    if setting != "force_interval":
+    if setting != "force_task_interval":
         return
     try:
         value = int(update.message.text)
@@ -4001,6 +4244,7 @@ def main():
     app.add_handler(CallbackQueryHandler(check_task_callback, pattern="^check_task_"))
     app.add_handler(CallbackQueryHandler(next_task_callback, pattern="^next_task$"))
     app.add_handler(CallbackQueryHandler(force_check_callback, pattern="^force_check_"))
+    app.add_handler(CallbackQueryHandler(check_sponsor_subs_callback, pattern="^check_sponsor_subs$"))
     
     # Callback обработчики - РЕФЕРАЛЫ
     app.add_handler(CallbackQueryHandler(referrals_menu, pattern="^referrals_menu$"))
@@ -4024,6 +4268,7 @@ def main():
     app.add_handler(CallbackQueryHandler(join_contest_callback, pattern="^join_contest_"))
     app.add_handler(CallbackQueryHandler(my_contests_callback, pattern="^my_contests$"))
     app.add_handler(CallbackQueryHandler(contest_winners_callback, pattern="^contest_winners$"))
+    app.add_handler(CallbackQueryHandler(sponsor_subs_callback, pattern="^sponsor_subs$"))
     
     # Callback обработчики - ВЫВОД
     app.add_handler(CallbackQueryHandler(request_withdraw_callback, pattern="^request_withdraw$"))
@@ -4040,6 +4285,8 @@ def main():
     app.add_handler(CallbackQueryHandler(add_force_sub_callback, pattern="^add_(channel|group)$"))
     app.add_handler(CallbackQueryHandler(remove_force_sub_callback, pattern="^remove_(channel|group)$"))
     app.add_handler(CallbackQueryHandler(remove_sub_confirmation, pattern="^remove_sub_"))
+    app.add_handler(CallbackQueryHandler(admin_sponsors_menu, pattern="^admin_sponsors$"))
+    app.add_handler(CallbackQueryHandler(toggle_sponsor_callback, pattern="^toggle_sponsor_"))
     app.add_handler(CallbackQueryHandler(admin_users_menu, pattern="^admin_users$"))
     app.add_handler(CallbackQueryHandler(ban_user_callback, pattern="^ban_user$"))
     app.add_handler(CallbackQueryHandler(unban_user_callback, pattern="^unban_user$"))
@@ -4110,12 +4357,13 @@ def main():
     print(f"🏅 Топ пользователей с призами")
     print(f"🎫 Промокоды активны")
     print(f"🔔 Автоуведомления: {'Включены' if settings.auto_notify else 'Выключены'}")
-    print(f"📋 Обязательные задания каждые {settings.force_task_interval} секунд")
+    print(f"📋 Интервал обязательных: {settings.force_task_interval}с")
     print(f"🎯 Конкурсы активны")
     print(f"🦅 Flyer API интегрирован")
     print(f"🟣 LinkNi API интегрирован")
     print(f"🎨 Цветовые пометки для спонсоров")
-    print(f"📝 Код: ~7000 строк")
+    print(f"📋 Обязательные спонсоры: {len(settings.force_sub_sponsors)}")
+    print(f"📝 Код: ~8000 строк")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
