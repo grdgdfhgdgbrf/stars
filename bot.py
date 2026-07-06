@@ -32,12 +32,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ========== КОНФИГУРАЦИЯ ==========
-BOT_TOKEN = "8251949164:AAHe6RTvf3OXniMVZd7_ICCH1BPtRNxHKFo"
+BOT_TOKEN = "8251949164:AAFRGh0wB7C0ZdMQ95oNPrrFGTsd6R-5h_U"
 
-BOTOHUB_TOKEN = "c72ddc9b-c2dc-4e3e-a985-7d51f0d77f58"
+BOTOHUB_TOKEN = "ae49fee8-827d-4771-a6bd-7e9ba579b710"
 BOTOHUB_API_URL = "https://botohub.me/get-tasks"
 
-PIARFLOW_API_KEY = "lCNi-V2kcnJoX9NjpOOtAOL9ee_0yyob"
+PIARFLOW_API_KEY = "hG3G-wLstzci6B9emgXV53EOvsOswto2"
 PIARFLOW_API_URL = "https://piarflow.com/v1"
 
 FLYER_API_KEY = "FL-kMgwjP-plEElI-rutLpT-UULXNI"
