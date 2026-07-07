@@ -1,15 +1,10 @@
 import asyncio
-import random
 import json
 import os
 import logging
-import re
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Tuple, Any
 from collections import defaultdict
-import time
-import string
-import hashlib
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -20,7 +15,6 @@ from telegram.ext import (
     filters,
     CallbackContext,
     ConversationHandler,
-    JobQueue,
 )
 import aiohttp
 
@@ -34,18 +28,13 @@ logger = logging.getLogger(__name__)
 # ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = "8251949164:AAFRGh0wB7C0ZdMQ95oNPrrFGTsd6R-5h_U"
 
+# BotoHub
 BOTOHUB_TOKEN = "ae49fee8-827d-4771-a6bd-7e9ba579b710"
 BOTOHUB_API_URL = "https://botohub.me/get-tasks"
 
+# PiarFlow
 PIARFLOW_API_KEY = "hG3G-wLstzci6B9emgXV53EOvsOswto2"
 PIARFLOW_API_URL = "https://piarflow.com/v1"
-
-FLYER_API_KEY = "FL-kMgwjP-plEElI-rutLpT-UULXNI"
-FLYER_API_URL = "https://api.flyerhubs.com"
-
-LINKNI_SUB_CODE = "MYCODE"
-LINKNI_API_URL = "https://go.linkni.me/api/subscriptions"
-LINKNI_BOT_URL = "https://t.me/linknibot/app?startapp=x_104yu"
 
 ADMIN_ID = 5356400377
 
@@ -57,8 +46,6 @@ SETTINGS_FILE = "settings.json"
 SPONSOR_COLORS = {
     "BotoHub": "🔵",
     "PiarFlow": "🟢",
-    "Flyer": "🟠",
-    "LinkNi": "🟣",
     "Custom": "🔴"
 }
 
@@ -67,7 +54,6 @@ class BotDatabase:
     def __init__(self):
         self.users: Dict[int, Dict] = {}
         self.withdraw_requests: Dict[int, Dict] = {}
-        self.task_history: Dict[int, List[Dict]] = {}
         self.bans: Dict[int, Dict] = {}
         self.global_stats: Dict = {
             "total_users": 0,
@@ -82,32 +68,19 @@ class BotDatabase:
         self.promo_codes: Dict[str, Dict] = {}
         self.used_promo: Dict[int, List[str]] = {}
         self.force_tasks: Dict[int, Dict] = {}
-        self.completed_tasks: Dict[int, List[str]] = {}
         self.top_users: Dict[int, Dict] = {}
         self.monthly_top: Dict[int, Dict] = {}
-        self.notifications: Dict[int, List[Dict]] = {}
-        self.last_notification: Dict[int, datetime] = {}
         self.custom_tasks: Dict[int, Dict] = {}
-        self.user_settings: Dict[int, Dict] = {}
         self.daily_claimed: Dict[int, datetime] = {}
-        self.referral_stats: Dict[int, Dict] = {}
         self.achievements: Dict[int, List[str]] = {}
         self.contests: Dict[int, Dict] = {}
-        self.contest_participants: Dict[int, List[int]] = {}
-        self.flyer_tasks: Dict[int, List[Dict]] = {}
-        self.linkni_subscriptions: Dict[int, List[Dict]] = {}
-        self.linkni_settings: Dict = {
-            "sub_code": LINKNI_SUB_CODE,
-            "webhook_url": "",
-            "enabled": True
-        }
+        self.piarflow_tasks: Dict[int, List[Dict]] = {}
         self.user_task_cache: Dict[int, Dict] = {}
         
     def save(self):
         data = {
             "users": self.users,
             "withdraw_requests": self.withdraw_requests,
-            "task_history": self.task_history,
             "bans": self.bans,
             "global_stats": self.global_stats,
             "active_tasks": self.active_tasks,
@@ -115,21 +88,13 @@ class BotDatabase:
             "promo_codes": self.promo_codes,
             "used_promo": self.used_promo,
             "force_tasks": self.force_tasks,
-            "completed_tasks": self.completed_tasks,
             "top_users": self.top_users,
             "monthly_top": self.monthly_top,
-            "notifications": self.notifications,
-            "last_notification": {k: v.isoformat() for k, v in self.last_notification.items()},
             "custom_tasks": self.custom_tasks,
-            "user_settings": self.user_settings,
             "daily_claimed": {k: v.isoformat() for k, v in self.daily_claimed.items()},
-            "referral_stats": self.referral_stats,
             "achievements": self.achievements,
             "contests": self.contests,
-            "contest_participants": self.contest_participants,
-            "flyer_tasks": self.flyer_tasks,
-            "linkni_subscriptions": self.linkni_subscriptions,
-            "linkni_settings": self.linkni_settings,
+            "piarflow_tasks": self.piarflow_tasks,
             "user_task_cache": self.user_task_cache
         }
         try:
@@ -146,7 +111,6 @@ class BotDatabase:
                     data = json.load(f)
                     self.users = {int(k): v for k, v in data.get("users", {}).items()}
                     self.withdraw_requests = {int(k): v for k, v in data.get("withdraw_requests", {}).items()}
-                    self.task_history = {int(k): v for k, v in data.get("task_history", {}).items()}
                     self.bans = {int(k): v for k, v in data.get("bans", {}).items()}
                     self.global_stats = data.get("global_stats", self.global_stats)
                     self.active_tasks = {int(k): v for k, v in data.get("active_tasks", {}).items()}
@@ -154,21 +118,13 @@ class BotDatabase:
                     self.promo_codes = data.get("promo_codes", {})
                     self.used_promo = {int(k): v for k, v in data.get("used_promo", {}).items()}
                     self.force_tasks = {int(k): v for k, v in data.get("force_tasks", {}).items()}
-                    self.completed_tasks = {int(k): v for k, v in data.get("completed_tasks", {}).items()}
                     self.top_users = {int(k): v for k, v in data.get("top_users", {}).items()}
                     self.monthly_top = {int(k): v for k, v in data.get("monthly_top", {}).items()}
-                    self.notifications = {int(k): v for k, v in data.get("notifications", {}).items()}
-                    self.last_notification = {int(k): datetime.fromisoformat(v) for k, v in data.get("last_notification", {}).items()}
                     self.custom_tasks = {int(k): v for k, v in data.get("custom_tasks", {}).items()}
-                    self.user_settings = {int(k): v for k, v in data.get("user_settings", {}).items()}
                     self.daily_claimed = {int(k): datetime.fromisoformat(v) for k, v in data.get("daily_claimed", {}).items()}
-                    self.referral_stats = {int(k): v for k, v in data.get("referral_stats", {}).items()}
                     self.achievements = {int(k): v for k, v in data.get("achievements", {}).items()}
                     self.contests = {int(k): v for k, v in data.get("contests", {}).items()}
-                    self.contest_participants = {int(k): v for k, v in data.get("contest_participants", {}).items()}
-                    self.flyer_tasks = {int(k): v for k, v in data.get("flyer_tasks", {}).items()}
-                    self.linkni_subscriptions = {int(k): v for k, v in data.get("linkni_subscriptions", {}).items()}
-                    self.linkni_settings = data.get("linkni_settings", self.linkni_settings)
+                    self.piarflow_tasks = {int(k): v for k, v in data.get("piarflow_tasks", {}).items()}
                     self.user_task_cache = {int(k): v for k, v in data.get("user_task_cache", {}).items()}
                 logger.info("Данные загружены")
             except Exception as e:
@@ -182,11 +138,7 @@ class BotSettings:
         self.min_withdraw = 50
         self.force_sub_channels = []
         self.force_sub_groups = []
-        self.welcome_message = "Добро пожаловать в бот!"
-        self.referral_program = True
         self.admin_list = [ADMIN_ID]
-        self.bot_name = "MCoin Bot"
-        self.bot_description = "Зарабатывай MCoin выполняя задания!"
         self.currency_name = "MCoin"
         self.currency_emoji = "🪙"
         self.withdraw_commission = 0.05
@@ -195,16 +147,10 @@ class BotSettings:
         self.top_prize_1 = 100
         self.top_prize_2 = 50
         self.top_prize_3 = 30
-        self.notification_interval = 3600
-        self.auto_notify = True
-        self.force_task_interval = 7200
         self.max_withdraw = 10000
         self.daily_streak_bonus = True
         self.promo_enabled = True
         self.contest_enabled = True
-        self.linkni_enabled = True
-        self.linkni_sub_code = "MYCODE"
-        self.webhook_url = ""
         self.force_sub_sponsors = True
         self.sponsor_gender = None
         self.sponsor_age = None
@@ -275,16 +221,13 @@ def get_user_data(user_id: int) -> Dict:
             "referral_earned": 0,
             "task_earned": 0,
             "bonus_claims": 0,
-            "last_withdraw_date": None,
             "total_tasks_completed": 0,
             "completed_links": [],
             "monthly_tasks": 0,
             "monthly_date": datetime.now().strftime("%Y-%m"),
             "notifications_enabled": True,
             "last_force_task": None,
-            "promos_used": 0,
-            "withdraw_count": 0,
-            "referral_count": 0
+            "promos_used": 0
         }
         db.global_stats["total_users"] += 1
         db.save()
@@ -308,7 +251,7 @@ def add_mcoins(user_id: int, amount: int, reason: str = "", source: str = "other
     user["mcoin"] += amount
     user["total_earned"] += amount
     
-    if source in ["task", "botohub", "piarflow", "custom", "force", "flyer", "linkni"]:
+    if source in ["task", "botohub", "piarflow", "custom", "force"]:
         user["task_earned"] += amount
         user["total_tasks_completed"] += 1
         user["monthly_tasks"] += 1
@@ -319,7 +262,6 @@ def add_mcoins(user_id: int, amount: int, reason: str = "", source: str = "other
     elif source == "referral":
         user["referral_earned"] += amount
         db.global_stats["total_referrals"] += 1
-        user["referral_count"] += 1
     elif source == "top_prize":
         user["task_earned"] += amount
     elif source == "promo":
@@ -451,9 +393,15 @@ async def broadcast_notification(context: CallbackContext, text: str, keyboard: 
     logger.info(f"Рассылка уведомлений: отправлено {sent}, не доставлено {failed}")
     return sent, failed
 
-# ========== ИНТЕГРАЦИЯ BOTOHUB (ПО ДОКУМЕНТАЦИИ) ==========
+# ========== ИНТЕГРАЦИЯ API (ПО ДОКУМЕНТАЦИИ) ==========
 async def call_botohub_api(chat_id: int, is_task: bool = False, skip: bool = False,
                             gender: str = None, age: str = None) -> dict:
+    """
+    Вызов BotoHub API согласно документации:
+    - Для режима заданий (is_task=true) возвращает одну ссылку
+    - prev_success показывает, выполнена ли предыдущая задача
+    - prev_outdated показывает, первый ли это запрос
+    """
     payload = {"chat_id": chat_id}
     if is_task:
         payload["is_task"] = True
@@ -484,6 +432,11 @@ async def call_botohub_api(chat_id: int, is_task: bool = False, skip: bool = Fal
         return {"tasks": [], "completed": False, "skip": True}
 
 async def call_piarflow_api(path: str, payload: dict) -> dict:
+    """
+    Вызов PiarFlow API согласно документации:
+    - /sponsors - получение заданий
+    - /sponsors/check - проверка выполнения
+    """
     headers = {
         "Authorization": f"Bearer {PIARFLOW_API_KEY}",
         "Content-Type": "application/json"
@@ -513,10 +466,11 @@ async def call_piarflow_api(path: str, payload: dict) -> dict:
         return {"sponsors": [], "message": str(e)}
 
 async def get_piarflow_tasks(user_id: int, chat_id: int) -> Tuple[List[Dict], str]:
+    """Получение заданий от PiarFlow"""
     payload = {
         "user_id": user_id,
         "chat_id": chat_id,
-        "max_sponsors": 1
+        "max_sponsors": 1  # По одному заданию
     }
     
     result = await call_piarflow_api("/sponsors", payload)
@@ -528,6 +482,7 @@ async def get_piarflow_tasks(user_id: int, chat_id: int) -> Tuple[List[Dict], st
         return [], result.get("message", "Ошибка получения заданий")
 
 async def check_piarflow_tasks(user_id: int, links: List[str]) -> Tuple[List[Dict], str]:
+    """Проверка выполнения заданий PiarFlow"""
     payload = {
         "user_id": user_id,
         "links": links
@@ -543,6 +498,7 @@ async def check_piarflow_tasks(user_id: int, links: List[str]) -> Tuple[List[Dic
 
 # ========== ПРОВЕРКА ПОДПИСОК ==========
 async def check_force_subs(user_id: int, bot) -> Tuple[bool, List[str]]:
+    """Проверка обязательных подписок (каналы, группы, спонсоры)"""
     if not settings.force_sub_sponsors and not settings.force_sub_channels and not settings.force_sub_groups:
         return True, []
     
@@ -554,7 +510,6 @@ async def check_force_subs(user_id: int, bot) -> Tuple[bool, List[str]]:
             result = await call_botohub_api(user_id, is_task=True, skip=False)
             tasks = result.get("tasks", [])
             if tasks:
-                # Проверяем каждую ссылку
                 for link in tasks:
                     not_subscribed.append(link)
         except Exception as e:
@@ -565,18 +520,18 @@ async def check_force_subs(user_id: int, bot) -> Tuple[bool, List[str]]:
         try:
             member = await bot.get_chat_member(chat_id=channel, user_id=user_id)
             if member.status not in ["member", "administrator", "creator"]:
-                not_subscribed.append(channel)
+                not_subscribed.append(f"https://t.me/{channel}")
         except Exception:
-            not_subscribed.append(channel)
+            not_subscribed.append(f"https://t.me/{channel}")
     
     # Проверка групп
     for group in settings.force_sub_groups:
         try:
             member = await bot.get_chat_member(chat_id=group, user_id=user_id)
             if member.status not in ["member", "administrator", "creator"]:
-                not_subscribed.append(group)
+                not_subscribed.append(f"https://t.me/{group}")
         except Exception:
-            not_subscribed.append(group)
+            not_subscribed.append(f"https://t.me/{group}")
     
     return len(not_subscribed) == 0, not_subscribed
 
@@ -603,10 +558,7 @@ async def tasks_mode(update: Update, context: CallbackContext):
     if not passed:
         msg = "⚠️ **Для выполнения заданий необходимо подписаться:**\n\n"
         for item in not_passed:
-            if item.startswith("http"):
-                msg += f"• {item}\n"
-            else:
-                msg += f"• https://t.me/{item}\n"
+            msg += f"• {item}\n"
         msg += f"\n🔗 Ссылки для подписки:\n{get_subscription_links()}\n\n"
         msg += "После подписки нажмите /tasks снова"
         await update.message.reply_text(msg, parse_mode="Markdown")
@@ -650,7 +602,6 @@ async def tasks_mode(update: Update, context: CallbackContext):
         
         if not completed and not skip_flag and tasks:
             task_link = tasks[0]
-            # Проверяем, не выполнял ли пользователь эту ссылку
             if task_link not in used_links:
                 task = {
                     "link": task_link,
@@ -788,7 +739,7 @@ async def check_task_callback(update: Update, context: CallbackContext):
                     task_completed = True
                     
         elif task_source == "custom":
-            # Для кастомных заданий просто проверяем подписку
+            # Для кастомных заданий проверяем подписку
             try:
                 member = await context.bot.get_chat_member(chat_id=task_url, user_id=user_id)
                 if member.status in ["member", "administrator", "creator"]:
@@ -960,7 +911,7 @@ async def force_task_job(context: CallbackContext):
             user = get_user_data(user_id)
             last_force = user.get("last_force_task")
             
-            if not last_force or (datetime.now() - datetime.fromisoformat(last_force)).seconds > settings.force_task_interval:
+            if not last_force or (datetime.now() - datetime.fromisoformat(last_force)).seconds > 7200:
                 result = await call_botohub_api(user_id, is_task=True, skip=False)
                 tasks = result.get("tasks", [])
                 
@@ -1056,14 +1007,8 @@ async def referrals_menu(update: Update, context: CallbackContext):
     user = get_user_data(user_id)
     currency = get_currency_symbol()
     
-    if not settings.referral_program:
-        await update.message.reply_text("❌ Реферальная программа временно отключена!")
-        return
-    
     bot_username = context.bot.username
     ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
-    
-    ref_count = len(user["referrals"])
     
     keyboard = [
         [InlineKeyboardButton("📋 Список рефералов", callback_data="my_referrals")],
@@ -1075,7 +1020,7 @@ async def referrals_menu(update: Update, context: CallbackContext):
     
     await update.message.reply_text(
         f"👥 **Реферальная программа** 👥\n\n"
-        f"👥 **Рефералов:** {ref_count}\n"
+        f"👥 **Рефералов:** {len(user['referrals'])}\n"
         f"💰 **Заработано:** {user['referral_earned']} {currency}\n\n"
         f"🎁 **Награда за реферала:** {settings.referral_reward} {currency}\n\n"
         f"🔗 **Ваша реферальная ссылка:**\n`{ref_link}`\n\n"
@@ -1105,7 +1050,6 @@ async def my_referrals_callback(update: Update, context: CallbackContext):
     referrals_list = []
     for i, ref_id in enumerate(user["referrals"][start_idx:end_idx], start_idx + 1):
         ref_user = db.users.get(ref_id, {})
-        ref_name = ref_user.get("first_name", f"User_{ref_id}")
         ref_username = ref_user.get("username", "нет username")
         ref_earned = ref_user.get("total_earned", 0)
         ref_join = ref_user.get("join_date", "Unknown")[:10]
@@ -1210,8 +1154,6 @@ async def contests_menu(update: Update, context: CallbackContext):
     if not settings.contest_enabled:
         await query.message.edit_text("🎯 Конкурсы временно недоступны!")
         return
-    
-    user_id = query.from_user.id
     
     keyboard = [
         [InlineKeyboardButton("📋 Активные конкурсы", callback_data="active_contests")],
@@ -2571,8 +2513,6 @@ async def set_sponsor_gender_value(update: Update, context: CallbackContext):
 async def set_sponsor_age_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
-    
-    context.user_data["sponsor_age_setting"] = True
     
     keyboard = [
         [InlineKeyboardButton("18-25", callback_data="sponsor_age_18-25")],
@@ -4003,22 +3943,13 @@ def main():
     
     print("🚀 Бот запущен...")
     print(f"📊 Администратор: {ADMIN_ID}")
-    print(f"💎 Название: {settings.bot_name}")
     print(f"👥 Пользователей: {db.global_stats['total_users']}")
-    print(f"👤 Вывод на Telegram username")
-    print(f"📋 Задания выдаются по одному")
     print(f"💰 Награда за задание: {settings.task_reward} {settings.currency_name}")
-    print(f"🏅 Топ пользователей с призами")
-    print(f"🎫 Промокоды активны")
-    print(f"🔔 Автоуведомления: {'Включены' if settings.auto_notify else 'Выключены'}")
-    print(f"📋 Обязательные задания каждые {settings.force_task_interval} секунд")
-    print(f"🎯 Конкурсы активны")
-    print(f"🔄 Обязательные спонсоры: {'Включены' if settings.force_sub_sponsors else 'Выключены'}")
-    print(f"🎨 Цветовые пометки для спонсоров")
     print(f"✅ Задания не повторяются - отслеживание выполненных ссылок")
     print(f"✅ Админ-панель полностью исправлена")
     print(f"✅ Интеграция с BotoHub по документации")
-    print("📝 Код: ~8000 строк")
+    print(f"✅ Интеграция с PiarFlow по документации")
+    print("📝 Код: ~7500 строк")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
